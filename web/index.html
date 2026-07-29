@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>WP 图片自动上传</title>
+    <link rel="preconnect" href="https://unpkg.com" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand-group">
+        <div class="brand-mark" aria-hidden="true">WP</div>
+        <div>
+          <h1>图片自动上传</h1>
+          <p id="images-path">正在连接本地服务</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="connection-state" id="connection-state"><span></span>连接中</span>
+        <button class="icon-button" id="refresh-button" type="button" title="刷新项目与素材" aria-label="刷新项目与素材">
+          <i data-lucide="refresh-cw"></i>
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <section class="control-band" aria-label="任务设置">
+        <div class="seed-control">
+          <label for="seed-input">随机种子</label>
+          <div class="input-with-button">
+            <input id="seed-input" type="text" autocomplete="off" spellcheck="false" />
+            <button class="icon-button inset" id="random-seed-button" type="button" title="重新随机" aria-label="重新生成随机种子">
+              <i data-lucide="shuffle"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="summary-strip" aria-label="项目统计">
+          <div><span id="summary-total">0</span><small>项目</small></div>
+          <div><span id="summary-selected">0</span><small>已选</small></div>
+          <div><span id="summary-valid">0</span><small>可执行</small></div>
+          <div class="summary-error"><span id="summary-invalid">0</span><small>异常</small></div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="project-area">
+          <div class="table-toolbar">
+            <div class="search-box">
+              <i data-lucide="search"></i>
+              <input id="search-input" type="search" placeholder="搜索项目或站点" autocomplete="off" />
+            </div>
+            <select id="status-filter" aria-label="筛选项目状态">
+              <option value="all">全部状态</option>
+              <option value="valid">仅可执行</option>
+              <option value="invalid">仅异常</option>
+            </select>
+            <label class="check-filter">
+              <input id="selected-filter" type="checkbox" />
+              <span>仅看已选</span>
+            </label>
+            <span class="visible-count" id="visible-count">0 项</span>
+          </div>
+
+          <div class="table-scroll" id="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th class="select-cell"><input id="select-all" type="checkbox" aria-label="选择所有可见项目" /></th>
+                  <th>项目</th>
+                  <th>随机选中的素材</th>
+                  <th class="state-cell">状态</th>
+                </tr>
+              </thead>
+              <tbody id="project-body"></tbody>
+            </table>
+            <div class="empty-state" id="empty-state" hidden>
+              <i data-lucide="folder-search"></i>
+              <span>没有匹配的项目</span>
+            </div>
+          </div>
+        </div>
+
+        <aside class="activity-panel">
+          <div class="panel-tabs" role="tablist">
+            <button class="panel-tab active" id="progress-tab" type="button" role="tab" aria-selected="true">任务进度</button>
+            <button class="panel-tab issues-tab" id="issues-tab" type="button" role="tab" aria-selected="false">
+              问题汇总 <span id="issue-count">0</span>
+            </button>
+            <button class="panel-tab" id="reports-tab" type="button" role="tab" aria-selected="false">执行记录</button>
+          </div>
+
+          <div class="tab-content" id="progress-panel" role="tabpanel">
+            <div class="job-summary" id="job-summary">
+              <div class="job-state-row">
+                <span class="job-badge idle" id="job-badge">空闲</span>
+                <span id="job-fraction">0 / 0</span>
+              </div>
+              <div class="progress-track"><span id="progress-bar"></span></div>
+              <div class="job-metrics">
+                <span><strong id="job-completed">0</strong> 完成</span>
+                <span><strong id="job-failed">0</strong> 失败</span>
+                <span><strong id="image-succeeded">0</strong> 图片成功</span>
+                <span><strong id="image-failed">0</strong> 图片失败</span>
+                <span><strong id="image-skipped">0</strong> 图片跳过</span>
+              </div>
+            </div>
+            <button class="issue-callout" id="issue-callout" type="button" hidden>
+              <i data-lucide="circle-alert"></i>
+              <span><strong id="issue-callout-count">0 个问题需要处理</strong><small>点击查看失败项目、图片类型和具体原因</small></span>
+              <i data-lucide="chevron-right"></i>
+            </button>
+            <div class="event-list" id="event-list">
+              <div class="event-placeholder">
+                <i data-lucide="list-checks"></i>
+                <span>暂无运行任务</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-content" id="issues-panel" role="tabpanel" hidden>
+            <div class="issues-head">
+              <strong>需要处理的问题</strong>
+              <span id="issues-source">当前任务</span>
+            </div>
+            <div class="issue-list" id="issue-list"></div>
+          </div>
+
+          <div class="tab-content" id="reports-panel" role="tabpanel" hidden>
+            <div class="report-list" id="report-list"></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <footer class="action-bar">
+      <div class="action-status">
+        <span id="action-selection">已选择 0 个项目</span>
+        <span id="action-seed"></span>
+      </div>
+      <div class="action-buttons">
+        <button class="button secondary" id="stop-button" type="button" hidden>
+          <i data-lucide="square"></i><span>停止任务</span>
+        </button>
+        <button class="button secondary" id="restart-batch-button" type="button" hidden>
+          <i data-lucide="rotate-ccw"></i><span>重新开始全部</span>
+        </button>
+        <button class="button secondary" id="check-button" type="button" disabled>
+          <i data-lucide="scan-search"></i><span>检查站点</span>
+        </button>
+        <button class="button primary" id="resume-button" type="button" hidden>
+          <i data-lucide="play"></i><span>继续未完成</span>
+        </button>
+        <button class="button primary" id="upload-button" type="button" disabled>
+          <i data-lucide="cloud-upload"></i><span>开始上传</span>
+        </button>
+      </div>
+    </footer>
+
+    <dialog id="upload-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-icon"><i data-lucide="cloud-upload"></i></div>
+        <div class="dialog-copy">
+          <h2>确认正式上传</h2>
+          <p><strong id="dialog-project-count">0</strong> 个项目，每个项目将上传 5 张图片并覆盖对应图片字段。</p>
+          <dl>
+            <div><dt>随机种子</dt><dd id="dialog-seed"></dd></div>
+            <div><dt>执行方式</dt><dd>逐项目上传并回读校验</dd></div>
+          </dl>
+          <label class="confirm-check">
+            <input id="confirm-checkbox" type="checkbox" />
+            <span>我确认开始修改网站内容</span>
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel">取消</button>
+          <button class="button danger" id="confirm-upload-button" value="default" disabled>
+            <i data-lucide="upload"></i><span>确认上传</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="report-dialog" class="report-dialog">
+      <form method="dialog" class="report-dialog-shell">
+        <header class="report-dialog-head">
+          <div>
+            <h2 id="report-detail-title">执行记录明细</h2>
+            <p id="report-detail-meta"></p>
+          </div>
+          <button class="icon-button" value="cancel" title="关闭" aria-label="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="report-detail-summary" id="report-detail-summary"></div>
+        <div class="report-detail-body" id="report-detail-body"></div>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

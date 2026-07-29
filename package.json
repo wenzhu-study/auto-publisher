@@ -1,0 +1,17 @@
+{
+  "name": "wp-image-auto-publisher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Batch upload project images to WordPress website content fields.",
+  "scripts": {
+    "check": "node src/cli.mjs",
+    "check:sites": "node src/cli.mjs --check-sites",
+    "upload": "node src/cli.mjs --execute",
+    "ui": "node src/server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
