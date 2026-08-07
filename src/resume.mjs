@@ -4,6 +4,9 @@ export function buildResumeState(report, sourceReport = '', options = {}) {
   if (report.status !== 'cancelled' && !(report.status === 'running' && allowRunning)) return null
 
   const selectedFolders = unique((report.plan || []).map((item) => item?.folderName).filter(Boolean))
+  const selectedFields = unique((report.plan || [])
+    .flatMap((item) => Array.isArray(item?.processFields) ? item.processFields : [])
+    .filter(Boolean))
   const selected = new Set(selectedFolders)
   const resultByFolder = new Map((report.results || [])
     .filter(Boolean)
@@ -26,11 +29,15 @@ export function buildResumeState(report, sourceReport = '', options = {}) {
   return {
     sourceReport,
     seed: report.seed || '',
+    projectText: report.projectText || '',
+    projectListName: report.projectListName || '',
+    importSummary: report.importSummary || null,
     total: selectedFolders.length,
     processed: processedFolders.length,
     remaining: remainingFolders.length,
     retryProjects: Object.keys(retryFieldsByFolder).length,
     selectedFolders,
+    selectedFields,
     processedFolders,
     remainingFolders,
     retryFieldsByFolder

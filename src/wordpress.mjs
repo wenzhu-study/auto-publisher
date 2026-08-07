@@ -305,22 +305,198 @@ export async function updateXmlRpcImageFields(project, pageId, expected) {
 }
 
 export async function preflightSite(project, options = {}) {
+  const fields = Array.isArray(options.fields)
+    ? [...new Set(options.fields.map(String))]
+    : ['ap_img', 'af_img', 'hp_img', 'mo_banner', 'pt_img']
+  const aboutFields = fields.filter((field) => ['ap_img', 'af_img', 'hp_img', 'mo_banner'].includes(field))
+  const needsPriceList = fields.includes('pt_img')
   const requestOptions = {
     timeoutMs: options.timeoutMs || 20000,
     retries: options.retries ?? 0
   }
   const [aboutPage, priceListPage] = await Promise.all([
-    findPage(project, 'about-us', {
-      ...requestOptions,
-      expectedFields: ['ap_img', 'af_img', 'hp_img', 'mo_banner']
-    }),
-    findPage(project, 'price-list', { ...requestOptions, expectedFields: ['pt_img'] })
+    aboutFields.length
+      ? findPage(project, 'about-us', { ...requestOptions, expectedFields: aboutFields })
+      : Promise.resolve(null),
+    needsPriceList
+      ? findPage(project, 'price-list', { ...requestOptions, expectedFields: ['pt_img'] })
+      : Promise.resolve(null)
   ])
   return {
-    aboutPageId: Number(aboutPage.id),
-    priceListPageId: Number(priceListPage.id),
-    missingFields: getMissingImageFields(aboutPage, priceListPage)
+    aboutPageId: aboutPage ? Number(aboutPage.id) : null,
+    priceListPageId: priceListPage ? Number(priceListPage.id) : null,
+    missingFields: getMissingImageFields(aboutPage, priceListPage).filter((field) => fields.includes(field))
   }
+}
+
+export async function resolvePublisherTargets(project, fields, options = {}) {
+  const pageFields = fields.filter((field) => field.targetType === 'page-featured')
+  const tagFields = fields.filter((field) => field.targetType === 'tag-banner')
+  const requestOptions = {
+    timeoutMs: options.timeoutMs || 20000,
+    retries: options.retries ?? 0
+  }
+  const [pageCollection, tagCollection] = await Promise.all([
+    pageFields.length ? fetchPublisherPages(project, requestOptions) : Promise.resolve({ items: [], error: '' }),
+    tagFields.length ? fetchProductTags(project, requestOptions) : Promise.resolve({ items: [], error: '' })
+  ])
+
+  return Object.fromEntries(fields.map((field) => {
+    const collection = field.targetType === 'tag-banner' ? tagCollection : pageCollection
+    const expectedSlug = String(field.pageSlug || field.key).toLowerCase()
+    const target = collection.items.find((item) => String(item?.slug || '').toLowerCase() === expectedSlug)
+    if (target) {
+      return [field.key, {
+        target: {
+          id: Number(target.id),
+          slug: target.slug,
+          name: target.name || target.title?.rendered || target.slug,
+          targetType: field.targetType
+        },
+        reason: ''
+      }]
+    }
+    const typeLabel = field.targetType === 'tag-banner' ? '产品标签' : '页面'
+    const suffix = collection.error ? `（${collection.error}）` : ''
+    return [field.key, { target: null, reason: `找不到 ${typeLabel} slug=${expectedSlug}${suffix}` }]
+  }))
+}
+
+export async function updateAndVerifyPageFeaturedImage(project, pageId, mediaId) {
+  const expectedId = Number(mediaId)
+  await wpRequest(project, `/wp-json/wp/v2/pages/${Number(pageId)}`, {
+    method: 'POST',
+    json: { featured_media: expectedId }
+  })
+  const page = await wpRequest(project, `/wp-json/wp/v2/pages/${Number(pageId)}`, {
+    params: { context: 'edit', _fields: 'id,slug,featured_media' }
+  })
+  const actualId = Number(page?.featured_media)
+  if (actualId !== expectedId) {
+    throw new Error(`页面 ID ${pageId} 特色图片回读不一致：期望 ${expectedId}，实际 ${actualId || '未读到'}`)
+  }
+  return { method: 'WordPress 页面特色图片', actual: { featured_media: actualId } }
+}
+
+export async function updateAndVerifyTagBanner(project, tagId, mediaId) {
+  const expectedId = Number(mediaId)
+  const attempts = [
+    {
+      name: 'WordPress 产品标签 REST ACF',
+      request: () => wpRequest(project, `/wp-json/wp/v2/product_tag/${Number(tagId)}`, {
+        method: 'POST',
+        json: { acf: { category_banner: expectedId } }
+      })
+    },
+    {
+      name: 'ACF REST product_tag',
+      request: () => wpRequest(project, `/wp-json/acf/v3/product_tag/${Number(tagId)}`, {
+        method: 'POST',
+        json: { fields: { category_banner: expectedId } }
+      })
+    },
+    {
+      name: 'WooCommerce 产品标签 meta_data',
+      request: () => wpRequest(project, `/wp-json/wc/v3/products/tags/${Number(tagId)}`, {
+        method: 'PUT',
+        json: { meta_data: [{ key: 'category_banner', value: expectedId }] }
+      })
+    }
+  ]
+  const errors = []
+
+  for (const attempt of attempts) {
+    try {
+      const response = await attempt.request()
+      const actualId = await readTagBannerMediaId(project, tagId, response)
+      if (actualId === expectedId) {
+        return { method: attempt.name, actual: { category_banner: actualId } }
+      }
+      errors.push(`${attempt.name}: 写入响应成功但回读不一致（实际 ${actualId || '未读到'}）`)
+    } catch (error) {
+      errors.push(`${attempt.name}: ${error.message}`)
+    }
+  }
+  throw new Error(`产品标签 ID ${tagId} category_banner 写入失败：${errors.join('；')}`)
+}
+
+async function fetchPublisherPages(project, requestOptions) {
+  const params = {
+    status: 'any',
+    context: 'edit',
+    per_page: 100,
+    _fields: 'id,title,slug,status,featured_media'
+  }
+  try {
+    const pages = await wpRequest(project, '/wp-json/wp/v2/pages', { ...requestOptions, params })
+    return { items: validTargets(pages), error: '' }
+  } catch (error) {
+    try {
+      const pages = await wpRequest(project, '/wp-json/wp/v2/pages', {
+        ...requestOptions,
+        params: { ...params, status: 'publish' }
+      })
+      return { items: validTargets(pages), error: '' }
+    } catch (fallbackError) {
+      return { items: [], error: fallbackError.message || error.message }
+    }
+  }
+}
+
+async function fetchProductTags(project, requestOptions) {
+  try {
+    const tags = await wpRequest(project, '/wp-json/wc/v3/products/tags', {
+      ...requestOptions,
+      params: { per_page: 100, hide_empty: false }
+    })
+    return { items: validTargets(tags), error: '' }
+  } catch (wooError) {
+    try {
+      const tags = await wpRequest(project, '/wp-json/wp/v2/product_tag', {
+        ...requestOptions,
+        params: { per_page: 100, hide_empty: false, context: 'edit' }
+      })
+      return { items: validTargets(tags), error: '' }
+    } catch (wpError) {
+      return { items: [], error: wpError.message || wooError.message }
+    }
+  }
+}
+
+async function readTagBannerMediaId(project, tagId, initialResponse) {
+  const sources = [initialResponse]
+  for (const endpoint of [
+    `/wp-json/wp/v2/product_tag/${Number(tagId)}`,
+    `/wp-json/acf/v3/product_tag/${Number(tagId)}`,
+    `/wp-json/wc/v3/products/tags/${Number(tagId)}`
+  ]) {
+    try {
+      sources.push(await wpRequest(project, endpoint, {
+        params: endpoint.includes('/wp/v2/') ? { context: 'edit' } : undefined
+      }))
+    } catch {
+      // Installations expose different combinations of tag and ACF routes.
+    }
+  }
+  return sources.flatMap(categoryBannerMediaIds)[0] || null
+}
+
+function categoryBannerMediaIds(source) {
+  if (!source || typeof source !== 'object') return []
+  const metaData = Array.isArray(source.meta_data)
+    ? source.meta_data.filter((item) => item?.key === 'category_banner').map((item) => item.value)
+    : []
+  return [
+    source.category_banner,
+    source.acf?.category_banner,
+    source.fields?.category_banner,
+    source.meta?.category_banner,
+    ...metaData
+  ].flatMap(extractMediaIds)
+}
+
+function validTargets(value) {
+  return Array.isArray(value) ? value.filter((item) => Number(item?.id) > 0) : []
 }
 
 export function getMissingImageFields(aboutPage) {

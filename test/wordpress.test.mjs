@@ -12,7 +12,10 @@ import {
   extractMediaUrls,
   findPage,
   getMissingImageFields,
+  resolvePublisherTargets,
   updateAndVerifyImageFields,
+  updateAndVerifyPageFeaturedImage,
+  updateAndVerifyTagBanner,
   uploadMedia
 } from '../src/wordpress.mjs'
 
@@ -75,6 +78,94 @@ test('finds the page that actually exposes the requested image fields', async ()
       expectedFields: ['ap_img', 'af_img', 'hp_img', 'mo_banner']
     })
     assert.equal(page.id, 32424)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('resolves new 3:1 fields to product tags and same-slug pages', async () => {
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost')
+    if (url.pathname === '/wp-json/wp/v2/pages') {
+      return json(response, 200, [
+        { id: 21, slug: 'home', featured_media: 0 },
+        { id: 27, slug: 'oem', featured_media: 0 },
+        { id: 31, slug: 'contact-us', featured_media: 0 }
+      ])
+    }
+    if (url.pathname === '/wp-json/wc/v3/products/tags') {
+      return json(response, 200, [
+        { id: 41, slug: 'hot-products', name: 'Hot Products' },
+        { id: 42, slug: 'new-products', name: 'New Products' }
+      ])
+    }
+    return json(response, 404, { message: 'not found' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const project = {
+    url: `http://127.0.0.1:${server.address().port}`,
+    username: 'shop',
+    appPassword: 'application-password'
+  }
+
+  try {
+    const found = await resolvePublisherTargets(project, [
+      { key: 'hot-products', targetType: 'tag-banner' },
+      { key: 'home', pageSlug: 'home', targetType: 'page-featured' },
+      { key: 'oem', pageSlug: 'oem', targetType: 'page-featured' },
+      { key: 'contact-us', pageSlug: 'contact-us', targetType: 'page-featured' },
+      { key: 'quality-control', pageSlug: 'quality-control', targetType: 'page-featured' }
+    ])
+    assert.equal(found['hot-products'].target.id, 41)
+    assert.equal(found['hot-products'].target.targetType, 'tag-banner')
+    assert.equal(found.home.target.id, 21)
+    assert.equal(found.oem.target.id, 27)
+    assert.equal(found.oem.target.targetType, 'page-featured')
+    assert.equal(found['contact-us'].target.id, 31)
+    assert.equal(found['quality-control'].target, null)
+    assert.match(found['quality-control'].reason, /页面 slug=quality-control/)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('writes and verifies page featured images and product tag category banners', async () => {
+  let featuredMedia = 0
+  let categoryBanner = 0
+  const server = http.createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://localhost')
+    if (request.method === 'POST' && url.pathname === '/wp-json/wp/v2/pages/21') {
+      const body = JSON.parse((await readBody(request)).toString('utf8'))
+      featuredMedia = Number(body.featured_media)
+      return json(response, 200, { id: 21, featured_media: featuredMedia })
+    }
+    if (request.method === 'GET' && url.pathname === '/wp-json/wp/v2/pages/21') {
+      return json(response, 200, { id: 21, slug: 'about-us', featured_media: featuredMedia })
+    }
+    if (request.method === 'POST' && url.pathname === '/wp-json/wp/v2/product_tag/41') {
+      const body = JSON.parse((await readBody(request)).toString('utf8'))
+      categoryBanner = Number(body.acf?.category_banner)
+      return json(response, 200, { id: 41, acf: { category_banner: categoryBanner } })
+    }
+    if (request.method === 'GET' && url.pathname === '/wp-json/wp/v2/product_tag/41') {
+      return json(response, 200, { id: 41, acf: { category_banner: categoryBanner } })
+    }
+    return json(response, 404, { message: 'not found' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const project = {
+    url: `http://127.0.0.1:${server.address().port}`,
+    username: 'shop',
+    appPassword: 'application-password'
+  }
+
+  try {
+    const pageResult = await updateAndVerifyPageFeaturedImage(project, 21, 801)
+    const tagResult = await updateAndVerifyTagBanner(project, 41, 802)
+    assert.equal(featuredMedia, 801)
+    assert.equal(categoryBanner, 802)
+    assert.equal(pageResult.method, 'WordPress 页面特色图片')
+    assert.equal(tagResult.method, 'WordPress 产品标签 REST ACF')
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
@@ -196,6 +287,12 @@ test('falls back to XML-RPC with existing custom-field IDs when REST ignores ACF
 function json(response, status, value) {
   response.writeHead(status, { 'Content-Type': 'application/json' })
   response.end(JSON.stringify(value))
+}
+
+async function readBody(request) {
+  const chunks = []
+  for await (const chunk of request) chunks.push(chunk)
+  return Buffer.concat(chunks)
 }
 
 function xml(response, value) {

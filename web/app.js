@@ -1,13 +1,19 @@
 const FIELD_LABELS = {
-  ap_img: '应用场景',
-  af_img: '售后服务',
-  hp_img: 'HotProducts',
-  mo_banner: '手机 banner',
-  pt_img: 'Price List'
+  ap_img: '应用场景 · 16:9',
+  af_img: '售后服务 · 1:1',
+  hp_img: '手机 HotProducts · 3:1',
+  mo_banner: '手机 Banner · 16:9',
+  pt_img: 'Price List · 9:16'
 }
 
 const state = {
   seed: '',
+  fields: [],
+  selectedFields: new Set(),
+  projectText: '',
+  projectListName: '',
+  importSummary: null,
+  imagesDirAvailable: false,
   projects: [],
   selected: new Set(),
   activeJob: null,
@@ -15,12 +21,16 @@ const state = {
   issueReport: null,
   issueReportName: '',
   pollingTimer: 0,
-  loading: false
+  loading: false,
+  selectingDirectory: false,
+  projectListLoading: false
 }
 
 const elements = Object.fromEntries(
   [
     'images-path', 'connection-state', 'refresh-button', 'seed-input', 'random-seed-button',
+    'project-list-state', 'project-file-input', 'image-directory-input', 'import-projects-button', 'clear-projects-button', 'select-images-button',
+    'field-options', 'select-all-fields', 'selected-field-count', 'field-count-total',
     'summary-total', 'summary-selected', 'summary-valid', 'summary-invalid', 'search-input',
     'status-filter', 'selected-filter', 'visible-count', 'select-all', 'project-body', 'empty-state',
     'progress-tab', 'issues-tab', 'reports-tab', 'progress-panel', 'issues-panel', 'reports-panel',
@@ -30,7 +40,8 @@ const elements = Object.fromEntries(
     'report-detail-meta', 'report-detail-summary', 'report-detail-body',
     'action-seed', 'stop-button', 'check-button', 'upload-button', 'upload-dialog',
     'resume-button', 'restart-batch-button',
-    'dialog-project-count', 'dialog-seed', 'confirm-checkbox', 'confirm-upload-button', 'toast-region'
+    'dialog-project-count', 'dialog-image-count', 'dialog-missing-count', 'dialog-seed', 'dialog-fields',
+    'confirm-checkbox', 'confirm-upload-button', 'toast-region'
   ].map((id) => [id, document.getElementById(id)])
 )
 
@@ -44,21 +55,49 @@ async function boot() {
       api('/api/config'),
       api('/api/resume').catch(() => ({ resume: null }))
     ])
-    state.resume = resumeResult.resume
+    if (!config.features?.fieldSelection || !config.features?.projectListImport ||
+        !config.features?.projectListLocalUrls ||
+        !config.features?.directoryPicker || !config.features?.browserDirectoryPicker ||
+        config.features?.imageFieldSchema !== 8) {
+      throw new Error('本地服务需要重启后才能使用最新图片分类')
+    }
+    state.imagesDirAvailable = Boolean(config.imagesDirAvailable)
+    state.resume = state.imagesDirAvailable ? resumeResult.resume : null
+    state.projectText = state.resume?.projectText || ''
+    state.projectListName = state.resume?.projectListName || ''
+    state.importSummary = state.resume?.importSummary || null
+    state.fields = config.fields
+    const resumeFields = new Set(state.resume?.selectedFields || [])
+    state.selectedFields = new Set(state.fields
+      .map((field) => field.key)
+      .filter((key) => !state.resume || resumeFields.size === 0 || resumeFields.has(key)))
     state.seed = state.resume?.seed || config.seed
     elements['seed-input'].value = state.seed
     elements['images-path'].textContent = config.imagesDir
+    renderFieldOptions()
+    renderProjectListState()
     setConnection(true)
-    await loadPlan()
+    if (state.imagesDirAvailable) {
+      const loaded = await loadPlan()
+      if (!loaded) return
+    } else {
+      renderProjects()
+      toast('当前图片文件夹不存在，请点击“选择图片文件夹”重新选择', 'error')
+    }
     await Promise.all([loadReports(), restoreActiveJob()])
   } catch (error) {
-    setConnection(false)
+    setConnection(!error.connectionFailed)
     toast(error.message, 'error')
   }
 }
 
 function bindEvents() {
   elements['refresh-button'].addEventListener('click', () => loadPlan(true))
+  elements['import-projects-button'].addEventListener('click', () => elements['project-file-input'].click())
+  elements['project-file-input'].addEventListener('change', importProjectList)
+  elements['clear-projects-button'].addEventListener('click', clearProjectList)
+  elements['select-images-button'].addEventListener('click', openImagesDirectoryPicker)
+  elements['image-directory-input'].addEventListener('change', selectImagesDirectory)
   elements['random-seed-button'].addEventListener('click', async () => {
     const wasResuming = Boolean(state.resume)
     state.resume = null
@@ -75,6 +114,8 @@ function bindEvents() {
     elements['seed-input'].value = state.seed
     await loadPlan()
   })
+  elements['field-options'].addEventListener('change', onFieldSelection)
+  elements['select-all-fields'].addEventListener('change', onAllFieldSelection)
   elements['search-input'].addEventListener('input', renderProjects)
   elements['status-filter'].addEventListener('change', renderProjects)
   elements['selected-filter'].addEventListener('change', renderProjects)
@@ -100,15 +141,167 @@ function bindEvents() {
   })
 }
 
+async function importProjectList() {
+  const file = elements['project-file-input'].files?.[0]
+  elements['project-file-input'].value = ''
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.txt')) {
+    toast('请选择 TXT 项目清单', 'error')
+    return
+  }
+  if (file.size > 1024 * 1024) {
+    toast('TXT 文件不能超过 1 MB', 'error')
+    return
+  }
+  try {
+    const bytes = await file.arrayBuffer()
+    let text
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } catch {
+      text = new TextDecoder('gb18030').decode(bytes)
+    }
+    if (!text.trim()) throw new Error('TXT 项目清单为空')
+    if (state.resume) {
+      await api('/api/resume/dismiss', { method: 'POST', body: '{}' })
+    }
+    state.resume = null
+    state.selected = new Set()
+    state.projectText = text
+    state.projectListName = file.name
+    state.importSummary = null
+    state.projectListLoading = true
+    renderProjectListState()
+    const loaded = await loadPlan()
+    state.projectListLoading = false
+    renderProjectListState()
+    if (!loaded) return
+    const summary = state.importSummary
+    toast(
+      summary
+        ? `已导入 ${summary.parsed} 个项目，匹配 ${summary.matched} 个${summary.unmatched ? `，异常 ${summary.unmatched} 个` : ''}`
+        : '项目清单已导入',
+      summary?.unmatched || summary?.invalidLines || summary?.duplicates ? 'error' : 'success'
+    )
+  } catch (error) {
+    state.projectListLoading = false
+    renderProjectListState()
+    toast(error.message, 'error')
+  }
+}
+
+async function clearProjectList() {
+  if (isRunning()) return
+  try {
+    if (state.resume) {
+      await api('/api/resume/dismiss', { method: 'POST', body: '{}' })
+    }
+    state.resume = null
+    state.projectText = ''
+    state.projectListName = ''
+    state.importSummary = null
+    state.projectListLoading = false
+    state.selected = new Set()
+    renderProjectListState()
+    const loaded = await loadPlan()
+    if (!loaded) return
+    toast('已清除项目清单，恢复显示全部项目', 'success')
+  } catch (error) {
+    toast(error.message, 'error')
+  }
+}
+
+function openImagesDirectoryPicker() {
+  if (state.selectingDirectory || isRunning()) return
+  elements['image-directory-input'].value = ''
+  elements['image-directory-input'].click()
+}
+
+async function selectImagesDirectory() {
+  const files = [...(elements['image-directory-input'].files || [])]
+  if (!files.length || isRunning()) return
+  const relativePaths = files.map((file) => file.webkitRelativePath).filter(Boolean)
+  const rootName = relativePaths[0]?.split('/')[0] || ''
+  state.selectingDirectory = true
+  setControls()
+  try {
+    toast(`正在读取图片文件夹：${rootName}`)
+    const result = await api('/api/images-directory/browser-select', {
+      method: 'POST',
+      body: JSON.stringify({
+        rootName,
+        relativePaths: sampleRelativePaths(relativePaths, 80)
+      })
+    })
+    elements['images-path'].textContent = result.imagesDir
+    state.imagesDirAvailable = true
+    state.resume = null
+    state.selected = new Set()
+    state.selectingDirectory = false
+    const loaded = await loadPlan()
+    if (loaded) toast(`已切换图片文件夹：${result.imagesDir}`, 'success')
+  } catch (error) {
+    toast(error.message, 'error')
+  } finally {
+    state.selectingDirectory = false
+    setControls()
+  }
+}
+
+function sampleRelativePaths(paths, limit) {
+  if (paths.length <= limit) return paths
+  const sampled = []
+  const step = (paths.length - 1) / (limit - 1)
+  for (let index = 0; index < limit; index += 1) sampled.push(paths[Math.round(index * step)])
+  return [...new Set(sampled)]
+}
+
+function renderProjectListState() {
+  const summary = state.importSummary
+  const imported = Boolean(state.projectText)
+  elements['project-list-state'].textContent = imported
+    ? `${state.projectListName || 'TXT 清单'} · ${summary
+        ? `${summary.matched}/${summary.parsed}`
+        : state.projectListLoading ? '读取中' : '读取失败'}`
+    : '全部项目'
+  const issueCount = summary
+    ? summary.unmatched + summary.duplicates + summary.invalidLines
+    : 0
+  elements['project-list-state'].classList.toggle('has-issues', issueCount > 0)
+  elements['project-list-state'].title = summary?.issues?.join('；') || ''
+  elements['import-projects-button'].querySelector('span').textContent = imported ? '更换项目清单' : '导入项目清单'
+  elements['clear-projects-button'].hidden = !imported
+  refreshIcons()
+}
+
+function restoreProjectListFromJob(job) {
+  if (!job?.projectText) return
+  state.projectText = job.projectText
+  state.projectListName = job.projectListName || '任务项目清单.txt'
+  state.importSummary = job.importSummary || null
+  renderProjectListState()
+}
+
 async function loadPlan(showSuccess = false) {
   if (state.loading || isRunning()) return
   state.loading = true
   setControls()
   try {
     state.seed = elements['seed-input'].value.trim() || state.seed
-    const result = await api(`/api/plan?seed=${encodeURIComponent(state.seed)}`)
+    const fields = [...state.selectedFields].join(',')
+    const result = state.projectText
+      ? await api('/api/plan', {
+          method: 'POST',
+          body: JSON.stringify({
+            seed: state.seed,
+            fields: [...state.selectedFields],
+            projectText: state.projectText
+          })
+        })
+      : await api(`/api/plan?seed=${encodeURIComponent(state.seed)}&fields=${encodeURIComponent(fields)}`)
     const previous = new Set(state.selected)
     state.projects = result.projects
+    state.importSummary = result.importSummary
     const resumable = new Set(state.resume?.remainingFolders || [])
     state.selected = new Set(state.projects
       .filter((project) => project.valid && (state.resume
@@ -119,11 +312,14 @@ async function loadPlan(showSuccess = false) {
     elements['summary-valid'].textContent = result.summary.valid
     elements['summary-invalid'].textContent = result.summary.invalid
     renderProjects()
+    renderProjectListState()
     setConnection(true)
     if (showSuccess) toast('项目和素材已刷新', 'success')
+    return true
   } catch (error) {
-    setConnection(false)
+    setConnection(!error.connectionFailed)
     toast(error.message, 'error')
+    return false
   } finally {
     state.loading = false
     setControls()
@@ -139,20 +335,33 @@ function renderProjects() {
     const alias = project.projectName && project.folderName !== project.projectName
       ? `<span class="project-site folder-alias">素材目录：${escapeHtml(project.folderName)}</span>`
       : ''
-    const files = Object.entries(FIELD_LABELS).map(([key, label]) => {
-      const fieldState = retryFields.size
+    const files = state.fields.map(({ key, label: fullLabel }) => {
+      const label = FIELD_LABELS[key] || fullLabel
+      const isSelected = state.selectedFields.has(key)
+      const fieldState = !isSelected
+        ? 'excluded'
+        : retryFields.size
         ? retryFields.has(key) ? 'retry' : 'already-complete'
         : ''
-      const fieldNote = fieldState === 'retry'
+      const count = project.counts[key] || 0
+      const fieldNote = fieldState === 'excluded'
+        ? '未选择'
+        : fieldState === 'retry'
         ? '待修复'
-        : fieldState ? '已成功，不重传' : `${project.counts[key] || 0} 选 1`
+        : fieldState ? '已成功，不重传' : count ? `${count} 选 1` : '0 张'
       return `
       <div class="file-item ${fieldState}" title="${escapeHtml(project.selected[key] || '')}">
         <b>${escapeHtml(label)} · ${fieldNote}</b>
-        <span>${escapeHtml(project.selected[key] || '缺失')}</span>
+        <span>${escapeHtml(fieldState === 'excluded' ? '本次不处理' : project.selected[key] || '缺失')}</span>
       </div>
     `}).join('')
     const issues = project.issues.join('；')
+    const order = project.importOrder
+      ? `<span class="project-order">${String(project.importOrder).padStart(2, '0')}</span>`
+      : ''
+    const issueNote = !project.valid && issues
+      ? `<span class="project-site project-error">${escapeHtml(issues)}</span>`
+      : ''
     return `
       <tr class="${checked ? 'selected' : ''}" data-folder="${escapeHtml(project.folderName)}">
         <td class="select-cell">
@@ -160,9 +369,10 @@ function renderProjects() {
             ${checked ? 'checked' : ''} ${isProjectSelectable(project) && !isRunning() ? '' : 'disabled'} />
         </td>
         <td>
-          <span class="project-name">${escapeHtml(project.projectName || project.folderName)}</span>
+          <span class="project-title-line">${order}<span class="project-name">${escapeHtml(project.projectName || project.importName || project.folderName)}</span></span>
           <span class="project-site">${escapeHtml(project.siteUrl || '未匹配站点')}</span>
           ${alias}
+          ${issueNote}
         </td>
         <td><div class="file-grid">${files}</div></td>
         <td class="state-cell">
@@ -220,13 +430,14 @@ function onProjectSelection(event) {
 
 function updateSelectionSummary() {
   const count = state.selected.size
+  const planCounts = plannedFieldCounts()
   const selectedRepairs = state.resume
     ? [...state.selected].filter((folder) => state.resume.retryFieldsByFolder?.[folder]?.length).length
     : 0
   elements['summary-selected'].textContent = count
   elements['action-selection'].textContent = state.resume
-    ? `续跑批次：已完成 ${state.resume.processed} 个，待执行 ${count} 个${selectedRepairs ? `（其中待修复 ${selectedRepairs} 个）` : ''}`
-    : `已选择 ${count} 个项目，共 ${count * 5} 张图片`
+    ? `续跑批次：已完成 ${state.resume.processed} 个，待执行 ${count} 个，共 ${planCounts.uploads} 张图片${planCounts.missing ? `，缺图 ${planCounts.missing} 项` : ''}${selectedRepairs ? `（其中待修复 ${selectedRepairs} 个）` : ''}`
+    : `已选择 ${count} 个项目，共 ${planCounts.uploads} 张图片${planCounts.missing ? `，缺图 ${planCounts.missing} 项` : ''}`
   elements['action-seed'].textContent = `随机种子：${state.seed}`
   setControls()
 }
@@ -247,6 +458,7 @@ function projectResumeState(project) {
 
 async function restartBatch() {
   if (isRunning()) return
+  await api('/api/resume/dismiss', { method: 'POST', body: '{}' }).catch(() => {})
   state.resume = null
   state.selected = new Set()
   state.seed = crypto.randomUUID().replaceAll('-', '').slice(0, 24)
@@ -256,14 +468,18 @@ async function restartBatch() {
 }
 
 function openUploadDialog() {
-  if (!state.selected.size || isRunning()) return
+  if (!state.selected.size || !state.selectedFields.size || isRunning()) return
+  const planCounts = plannedFieldCounts()
   elements['dialog-project-count'].textContent = state.selected.size
+  elements['dialog-image-count'].textContent = planCounts.uploads
+  elements['dialog-missing-count'].textContent = planCounts.missing
   elements['dialog-seed'].textContent = state.seed
+  elements['dialog-fields'].textContent = selectedFieldLabels().join('、')
   elements['upload-dialog'].showModal()
 }
 
 async function startJob(mode) {
-  if (!state.selected.size || isRunning()) return
+  if (!state.selected.size || !state.selectedFields.size || isRunning()) return
   try {
     switchPanel('progress')
     const result = await api(mode === 'upload' ? '/api/upload' : '/api/check', {
@@ -271,6 +487,9 @@ async function startJob(mode) {
       body: JSON.stringify({
         seed: state.seed,
         projects: [...state.selected],
+        fields: [...state.selectedFields],
+        projectText: state.projectText || undefined,
+        projectListName: state.projectListName || undefined,
         resumeFields: state.resume?.retryFieldsByFolder || undefined,
         confirmation: mode === 'upload' ? 'UPLOAD' : undefined
       })
@@ -304,7 +523,16 @@ async function restoreActiveJob() {
     const result = await api('/api/job/active')
     if (!result.job) return
     state.activeJob = result.job
-    if (state.activeJob.mode === 'upload' && state.activeJob.status === 'cancelled') {
+    const shouldRestoreTaskPlan = isRunning() || Boolean(state.resume)
+    if (shouldRestoreTaskPlan) {
+      restoreProjectListFromJob(state.activeJob)
+      if (state.activeJob.projectText && state.activeJob.plan?.length) {
+        state.projects = state.activeJob.plan
+        state.selected = new Set(state.activeJob.selectedFolders || [])
+        renderProjects()
+      }
+    }
+    if (state.resume && state.activeJob.mode === 'upload' && state.activeJob.status === 'cancelled') {
       applyResumeFromJob(state.activeJob)
       renderProjects()
     }
@@ -316,6 +544,7 @@ async function restoreActiveJob() {
 }
 
 function applyResumeFromJob(job) {
+  restoreProjectListFromJob(job)
   const selectedFolders = job.selectedFolders || []
   const resultByFolder = new Map((job.results || []).filter(Boolean).map((result) => [result.folderName, result]))
   const processedFolders = []
@@ -345,11 +574,19 @@ function applyResumeFromJob(job) {
     remaining: remainingFolders.length,
     retryProjects: Object.keys(retryFieldsByFolder).length,
     selectedFolders,
+    selectedFields: [...new Set((job.plan || []).flatMap((item) => item.processFields || []))],
+    projectText: job.projectText || '',
+    projectListName: job.projectListName || '',
+    importSummary: job.importSummary || null,
     processedFolders,
     remainingFolders,
     retryFieldsByFolder
   } : null
   state.seed = job.seed
+  if (state.resume?.selectedFields?.length) {
+    state.selectedFields = new Set(state.resume.selectedFields)
+    renderFieldOptions()
+  }
   elements['seed-input'].value = state.seed
   state.selected = new Set(remainingFolders)
 }
@@ -651,7 +888,7 @@ function switchPanel(panel) {
 
 function setControls() {
   const running = isRunning()
-  const unavailable = state.loading || running || state.selected.size === 0
+  const unavailable = state.loading || state.selectingDirectory || running || state.selected.size === 0 || state.selectedFields.size === 0
   elements['check-button'].disabled = unavailable
   elements['upload-button'].disabled = unavailable
   elements['resume-button'].disabled = unavailable
@@ -664,6 +901,79 @@ function setControls() {
   elements['refresh-button'].disabled = state.loading || running
   elements['random-seed-button'].disabled = state.loading || running
   elements['seed-input'].disabled = state.loading || running
+  elements['import-projects-button'].disabled = state.loading || running
+  elements['clear-projects-button'].disabled = state.loading || running
+  elements['select-images-button'].disabled = state.selectingDirectory || running
+  elements['select-images-button'].setAttribute('aria-busy', String(state.selectingDirectory))
+  elements['select-all-fields'].disabled = state.loading || running || Boolean(state.resume)
+  for (const input of elements['field-options'].querySelectorAll('.field-checkbox')) {
+    input.disabled = state.loading || running || Boolean(state.resume)
+  }
+}
+
+function renderFieldOptions() {
+  elements['field-options'].innerHTML = state.fields.map((field) => `
+    <label class="field-option ${state.selectedFields.has(field.key) ? 'selected' : ''}"
+      title="${escapeHtml(field.label)}">
+      <input class="field-checkbox" type="checkbox" value="${escapeHtml(field.key)}"
+        ${state.selectedFields.has(field.key) ? 'checked' : ''} />
+      <span>
+        <strong>${escapeHtml(FIELD_LABELS[field.key] || field.label)}</strong>
+        <small>${escapeHtml(field.prefix)}</small>
+      </span>
+    </label>
+  `).join('')
+  elements['selected-field-count'].textContent = state.selectedFields.size
+  elements['field-count-total'].textContent = state.fields.length
+  syncAllFieldSelection()
+  setControls()
+}
+
+function syncAllFieldSelection() {
+  const total = state.fields.length
+  const selected = state.selectedFields.size
+  elements['select-all-fields'].checked = total > 0 && selected === total
+  elements['select-all-fields'].indeterminate = selected > 0 && selected < total
+}
+
+async function onAllFieldSelection() {
+  if (state.loading || isRunning() || state.resume) return
+  state.selectedFields = elements['select-all-fields'].checked
+    ? new Set(state.fields.map((field) => field.key))
+    : new Set()
+  renderFieldOptions()
+  await loadPlan()
+}
+
+async function onFieldSelection(event) {
+  const input = event.target.closest('.field-checkbox')
+  if (!input || isRunning() || state.resume) return
+  state.selectedFields = new Set([...elements['field-options'].querySelectorAll('.field-checkbox:checked')]
+    .map((checkbox) => checkbox.value))
+  renderFieldOptions()
+  await loadPlan()
+}
+
+function plannedFieldCounts() {
+  const projects = new Map(state.projects.map((project) => [project.folderName, project]))
+  let uploads = 0
+  let missing = 0
+  for (const folder of state.selected) {
+    const project = projects.get(folder)
+    const retryFields = state.resume?.retryFieldsByFolder?.[folder]
+    const fieldKeys = retryFields?.length ? retryFields : [...state.selectedFields]
+    for (const key of fieldKeys) {
+      if (project?.selected?.[key]) uploads += 1
+      else missing += 1
+    }
+  }
+  return { uploads, missing }
+}
+
+function selectedFieldLabels() {
+  return state.fields
+    .filter((field) => state.selectedFields.has(field.key))
+    .map((field) => FIELD_LABELS[field.key] || field.label)
 }
 
 function isRunning() {
@@ -730,10 +1040,20 @@ function jobBadgeClass(status) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options
-  })
+  let response
+  const { timeoutMs = 30000, ...fetchOptions } = options
+  try {
+    response = await fetch(url, {
+      ...fetchOptions,
+      headers: { 'Content-Type': 'application/json', ...(fetchOptions.headers || {}) },
+      signal: fetchOptions.signal || AbortSignal.timeout(timeoutMs)
+    })
+  } catch (cause) {
+    if (cause.name === 'TimeoutError') throw new Error('请求等待超时，请重试')
+    const error = new Error(`无法连接本地服务：${cause.message}`)
+    error.connectionFailed = true
+    throw error
+  }
   const data = await response.json().catch(() => ({}))
   if (!response.ok || data.ok === false) throw new Error(data.error || `请求失败：HTTP ${response.status}`)
   return data

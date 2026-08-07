@@ -19,6 +19,18 @@
       </div>
       <div class="topbar-actions">
         <span class="connection-state" id="connection-state"><span></span>连接中</span>
+        <span class="project-list-state" id="project-list-state">全部项目</span>
+        <input id="project-file-input" type="file" accept=".txt,text/plain" hidden />
+        <input id="image-directory-input" type="file" webkitdirectory directory multiple hidden />
+        <button class="topbar-command" id="import-projects-button" type="button" title="导入 TXT 项目清单" aria-label="导入 TXT 项目清单">
+          <i data-lucide="file-up"></i><span>导入项目清单</span>
+        </button>
+        <button class="icon-button" id="clear-projects-button" type="button" title="清除项目清单" aria-label="清除项目清单" hidden>
+          <i data-lucide="x"></i>
+        </button>
+        <button class="topbar-command" id="select-images-button" type="button" title="选择本地图片文件夹" aria-label="选择本地图片文件夹">
+          <i data-lucide="folder-open"></i><span>选择图片文件夹</span>
+        </button>
         <button class="icon-button" id="refresh-button" type="button" title="刷新项目与素材" aria-label="刷新项目与素材">
           <i data-lucide="refresh-cw"></i>
         </button>
@@ -43,6 +55,17 @@
           <div><span id="summary-valid">0</span><small>可执行</small></div>
           <div class="summary-error"><span id="summary-invalid">0</span><small>异常</small></div>
         </div>
+      </section>
+
+      <section class="field-band" aria-label="图片分类">
+        <div class="field-band-title">
+          <label class="field-select-all" title="选择或取消全部图片分类">
+            <strong>图片分类</strong>
+            <input id="select-all-fields" type="checkbox" aria-label="选择或取消全部图片分类" />
+          </label>
+          <span><b id="selected-field-count">0</b> / <i id="field-count-total">0</i></span>
+        </div>
+        <div class="field-options" id="field-options"></div>
       </section>
 
       <section class="workspace">
@@ -164,9 +187,10 @@
         <div class="dialog-icon"><i data-lucide="cloud-upload"></i></div>
         <div class="dialog-copy">
           <h2>确认正式上传</h2>
-          <p><strong id="dialog-project-count">0</strong> 个项目，每个项目将上传 5 张图片并覆盖对应图片字段。</p>
+          <p><strong id="dialog-project-count">0</strong> 个项目，本次共上传 <strong id="dialog-image-count">0</strong> 张图片；缺图 <strong id="dialog-missing-count">0</strong> 项会记录并跳过。</p>
           <dl>
             <div><dt>随机种子</dt><dd id="dialog-seed"></dd></div>
+            <div><dt>图片分类</dt><dd id="dialog-fields"></dd></div>
             <div><dt>执行方式</dt><dd>逐项目上传并回读校验</dd></div>
           </dl>
           <label class="confirm-check">

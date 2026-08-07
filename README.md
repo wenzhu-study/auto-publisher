@@ -4,13 +4,30 @@
 
 ## 字段对应
 
-| 文件名前缀 | 页面 | WordPress/ACF 字段 |
+| 文件名前缀 | WP AI Publisher 位置 | 写入目标 |
 | --- | --- | --- |
-| `about-us-` | About Us | `ap_img` |
-| `after-sales-` | About Us | `af_img` |
-| `mobile-hot-products-banner-` | About Us | `hp_img` |
-| `mobile-banner-` | About Us | `mo_banner`（写入 1 张） |
-| `price-list-` | Price List | `pt_img` |
+| `hot-products-3-1-` | 产品标签 / `hot-products` | 横幅 `category_banner` |
+| `new-products-3-1-` | 产品标签 / `new-products` | 横幅 `category_banner` |
+| `all-products-3-1-` | 页面 / `all-products` | 特色图片 `featured_media` |
+| `products-3-1-` | 页面 / `products` | 特色图片 `featured_media` |
+| `about-us-3-1-` | 页面 / `about-us` | 特色图片 `featured_media` |
+| `after-sales-3-1-` | 页面 / `after-sales` | 特色图片 `featured_media` |
+| `agentcy-3-1-` | 页面 / `agentcy` | 特色图片 `featured_media` |
+| `catalog-3-1-` | 页面 / `catalog` | 特色图片 `featured_media` |
+| `contact-us-3-1-` | 页面 / `contact-us` | 特色图片 `featured_media` |
+| `faq-3-1-` | 页面 / `faq` | 特色图片 `featured_media` |
+| `home-3-1-` | 页面 / `home` | 特色图片 `featured_media` |
+| `oem-3-1-` | 页面 / `oem` | 特色图片 `featured_media` |
+| `order-terms-3-1-` | 页面 / `order-terms` | 特色图片 `featured_media` |
+| `price-list-3-1-` | 页面 / `price-list` | 特色图片 `featured_media` |
+| `quality-control-3-1-` | 页面 / `quality-control` | 特色图片 `featured_media` |
+| `about-us-16-9-` | About Us | `ap_img` |
+| `after-sales-1-1-` | About Us | `af_img` |
+| `mobile-hot-products-banner-3-1-` | About Us | `hp_img` |
+| `mobile-banner-16-9-` | About Us | `mo_banner`（写入 1 张） |
+| `price-list-9-16-` | Price List | `pt_img` |
+
+顶部项目下拉框对应 KeyHub 的项目名，工具仍使用素材文件夹名匹配该项目。新增的 3:1 分类中，前两个按产品标签 slug 定位，其余按页面 slug 定位；目标不存在时会记录并跳过，避免写错位置。
 
 ## 使用
 
@@ -24,9 +41,25 @@
 npm run ui
 ```
 
-然后打开 <http://127.0.0.1:3580/>。界面支持搜索和勾选项目、重新随机素材、站点检查、正式上传、逐图片实时进度、安全停止以及可视化执行记录。执行记录可展开查看每个项目五张图的文件名、字段、媒体 ID、成功/失败阶段和错误原因。服务仅监听本机地址，WordPress 凭据不会发送到浏览器。
+然后打开 <http://127.0.0.1:3580/>。界面支持勾选图片分类、搜索和勾选项目、重新随机素材、站点检查、正式上传、逐图片实时进度、安全停止以及可视化执行记录。执行记录可展开查看本次所选图片的文件名、字段、媒体 ID、成功/失败阶段和错误原因。服务仅监听本机地址，WordPress 凭据不会发送到浏览器。
 
-点击“停止任务”后，工具会完成当前项目再停止，并保存续跑检查点。重新打开或刷新界面时会自动沿用原随机种子：已经处理过的项目显示“已处理”且不可选择，只有从未开始的项目显示“待继续”并保持选中。点击“继续未完成”即可接着执行；点击“重新开始全部”才会退出续跑并重新选择完整批次。
+点击顶部“选择图片文件夹”会打开 Windows 文件夹选择窗口。请选择包含各个项目子文件夹的上级目录，例如 `D:\Desktop\生图\图片2`，工具会直接从该路径扫描图片，不会把素材复制进项目。所选路径保存在本机 `logs/local-settings.json`，下次启动时会自动恢复；任务运行或续跑期间不能切换目录。
+
+“图片分类”默认全部勾选。取消某个分类后，计划只处理其余已勾选分类；分类有 1 张图时直接选中，有多张图时按随机种子选择 1 张，没有图片时在执行记录中标记为跳过，其余分类继续。缺图不会阻止整个项目执行，不属于现有分类的额外文件会被忽略，至少需要勾选 1 个分类才能开始任务。
+
+点击顶部“导入项目清单”可以选择 TXT 文件。每行填写一个项目名称和网址，支持英文或中文冒号：
+
+```text
+宝石：https://www.china-gemstone.com/
+宠物玩具：https://www.china-pettoy.com/
+按摩椅：https://www.china-massagechairs.com/
+```
+
+导入后只显示清单中的项目，并严格按照 TXT 从上到下的顺序检查和上传。工具会用名称与网址匹配 KeyHub 凭据和素材文件夹；格式错误、重复、网址冲突、KeyHub 中不存在或缺少素材文件夹的项目会显示为异常且不会执行。TXT 只负责选择项目和确定顺序，WordPress 用户名与应用密码仍从 KeyHub 安全读取。
+
+TXT 也支持 `localhost`、`127.x.x.x`、`10.x.x.x`、`172.16.x.x` 至 `172.31.x.x`、`192.168.x.x` 等本地或局域网网址，并保留端口号。使用本地网址时，工具优先按项目名读取对应的 KeyHub 用户名和应用密码，再以 TXT 中的网址作为实际上传目标；因此多个项目共用同一个本地地址时，项目名必须准确且唯一。
+
+点击“停止任务”后，工具会完成当前项目再停止，并保存续跑检查点。重新打开或刷新界面时会自动沿用原随机种子和图片分类：已经处理过的项目显示“已处理”且不可选择，只有从未开始的项目显示“待继续”并保持选中。点击“继续未完成”即可接着执行；点击“重新开始全部”才会退出续跑并重新选择完整批次。
 
 ### 命令行
 
@@ -66,9 +99,9 @@ node src/cli.mjs --help
 - 默认命令只检查，不写网站；必须显式使用 `--execute` 或 `npm run upload`。
 - 项目账号从 KeyHub 的 `shop` 角色动态读取，不保存到代码和日志。
 - 项目严格按顺序执行；单张图片失败后会继续处理该项目的其他图片，项目结束后继续下一个项目。
-- 每次写入后都会回读 WordPress/ACF 字段并核对媒体 ID。
+- 每次写入后都会回读 WordPress/ACF 字段、页面特色图片或产品标签横幅并核对媒体 ID。
 - WordPress 可能按字段设置返回媒体 URL；工具会反查媒体 ID 对应 URL 后校验，避免把成功写入误报为失败。
-- 站点未定义某个 ACF 图片字段时，该字段会在上传前跳过并记录警告，其余字段和后续项目继续执行。
+- 站点未定义某个 ACF 图片字段、同 slug 页面或产品标签时，该项会在上传前跳过并记录警告，其余图片和后续项目继续执行。
 - 执行报告保存在 `logs`，逐项目、逐字段记录文件名、上传状态、写入状态、页面 ID、媒体 ID 和完整错误原因，不包含密码。
 - 某个项目失败后，可根据报告用 `--project <项目名>` 单独重试。
 

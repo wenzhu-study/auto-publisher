@@ -14,8 +14,21 @@ export function classifyImageName(filename) {
   return { kind: 'image', filename, field, extension }
 }
 
-export async function scanImageProjects(imagesDir, seed) {
-  const entries = await readdir(imagesDir, { withFileTypes: true })
+export async function scanImageProjects(
+  imagesDir,
+  seed,
+  fieldKeys = IMAGE_FIELDS.map((field) => field.key),
+  options = {}
+) {
+  const requiredFields = new Set(fieldKeys)
+  let entries
+  try {
+    entries = await readdir(imagesDir, { withFileTypes: true })
+  } catch (error) {
+    if (error.code === 'ENOENT' && options.allowMissingRoot) return []
+    if (error.code === 'ENOENT') throw new Error(`图片文件夹不存在：${imagesDir}，请重新选择图片文件夹`)
+    throw error
+  }
   const folders = entries
     .filter((entry) => entry.isDirectory())
     .sort((left, right) => sortChinese(left.name, right.name))
@@ -36,13 +49,11 @@ export async function scanImageProjects(imagesDir, seed) {
       if (classified.kind === 'image') {
         groups[classified.field.key].push(path.join(directory, filename))
       } else if (classified.kind === 'unsupported') {
-        issues.push(`文件格式不支持：${filename}`)
-      } else {
-        issues.push(`无法识别文件名前缀：${filename}`)
+        if (requiredFields.has(classified.field.key)) issues.push(`文件格式不支持：${filename}`)
       }
     }
 
-    for (const field of IMAGE_FIELDS) {
+    for (const field of IMAGE_FIELDS.filter((item) => requiredFields.has(item.key) && !item.optional)) {
       if (groups[field.key].length === 0) {
         issues.push(`缺少 ${field.label}（文件名应以 ${field.prefix} 开头）`)
       }
@@ -51,7 +62,9 @@ export async function scanImageProjects(imagesDir, seed) {
     const selected = Object.fromEntries(
       IMAGE_FIELDS.map((field) => [
         field.key,
-        chooseDeterministically(groups[field.key], seed, `${folder.name}:${field.key}`)
+        requiredFields.has(field.key)
+          ? chooseDeterministically(groups[field.key], seed, `${folder.name}:${field.key}`)
+          : null
       ])
     )
 

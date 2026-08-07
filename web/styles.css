@@ -129,6 +129,38 @@ p {
   gap: 10px;
 }
 
+.project-list-state {
+  max-width: 260px;
+  overflow: hidden;
+  color: #b9c3cc;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-list-state.has-issues {
+  color: #ffabb2;
+}
+
+.topbar-command {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 11px;
+  color: #e5e9ed;
+  background: transparent;
+  border: 1px solid #56616c;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.topbar-command:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .connection-state {
   display: inline-flex;
   align-items: center;
@@ -165,6 +197,7 @@ p {
 }
 
 .icon-button svg,
+.topbar-command svg,
 .button svg,
 .search-box svg,
 .empty-state svg,
@@ -272,10 +305,114 @@ select:focus-visible {
   color: var(--red);
 }
 
+.field-band {
+  height: 138px;
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  align-items: stretch;
+  background: #f0f3f6;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.field-band-title {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 9px 16px;
+  border-right: 1px solid var(--line);
+}
+
+.field-band-title strong {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.field-select-all {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.field-select-all input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--blue);
+}
+
+.field-band-title span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.field-band-title b {
+  color: var(--blue);
+  font-size: 13px;
+}
+
+.field-band-title i {
+  font-style: normal;
+}
+
+.field-options {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(128px, 1fr));
+  grid-template-rows: repeat(3, 46px);
+  overflow-x: auto;
+}
+
+.field-option {
+  min-width: 128px;
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 13px;
+  color: #66717c;
+  background: #f7f9fa;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.field-option.selected {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
+
+.field-option span,
+.field-option strong,
+.field-option small {
+  min-width: 0;
+  display: block;
+}
+
+.field-option strong,
+.field-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-option strong {
+  font-size: 11px;
+}
+
+.field-option small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 354px;
-  min-height: calc(100vh - 226px);
+  height: calc(100vh - 364px);
+  min-height: 320px;
   background: var(--surface);
 }
 
@@ -353,8 +490,8 @@ input[type="checkbox"] {
 
 .table-scroll {
   position: relative;
-  height: calc(100vh - 280px);
-  min-height: 420px;
+  height: calc(100% - 54px);
+  min-height: 0;
   overflow: auto;
 }
 
@@ -419,6 +556,25 @@ tbody tr.selected {
   white-space: nowrap;
 }
 
+.project-title-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.project-order {
+  min-width: 23px;
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.project-title-line .project-name {
+  min-width: 0;
+  flex: 1;
+}
+
 .project-site {
   display: block;
   margin-top: 5px;
@@ -433,9 +589,13 @@ tbody tr.selected {
   color: var(--amber);
 }
 
+.project-error {
+  color: var(--red);
+}
+
 .file-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(92px, 1fr));
+  grid-template-columns: repeat(7, minmax(92px, 1fr));
   gap: 5px;
 }
 
@@ -445,6 +605,12 @@ tbody tr.selected {
   background: #f6f8f9;
   border: 1px solid #e1e5e8;
   border-radius: 4px;
+}
+
+.file-item.excluded {
+  opacity: 0.5;
+  background: #eef1f3;
+  border-style: dashed;
 }
 
 .file-item b,
@@ -543,7 +709,20 @@ tbody tr.selected {
 
 .activity-panel {
   min-width: 0;
+  height: 100%;
+  overflow: hidden;
   background: #fbfcfd;
+}
+
+#progress-panel,
+#issues-panel,
+#reports-panel {
+  height: calc(100% - 54px);
+}
+
+#progress-panel {
+  display: flex;
+  flex-direction: column;
 }
 
 .panel-tabs {
@@ -670,10 +849,19 @@ tbody tr.selected {
 .event-list,
 .report-list,
 .issue-list {
-  height: calc(100vh - 407px);
-  min-height: 293px;
   overflow-y: auto;
   padding: 8px 14px 20px;
+}
+
+.event-list {
+  height: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.report-list {
+  height: 100%;
+  min-height: 0;
 }
 
 .issue-callout {
@@ -717,8 +905,8 @@ tbody tr.selected {
 }
 
 .issue-callout:not([hidden]) + .event-list {
-  height: calc(100vh - 471px);
-  min-height: 229px;
+  height: auto;
+  min-height: 0;
 }
 
 .issues-head {
@@ -747,7 +935,8 @@ tbody tr.selected {
 }
 
 .issue-list {
-  height: calc(100vh - 353px);
+  height: calc(100% - 58px);
+  min-height: 0;
   padding-top: 12px;
   background: #f5f7f9;
 }
@@ -1426,6 +1615,7 @@ dialog::backdrop {
 @media (max-width: 1100px) {
   .workspace {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .project-area {
@@ -1433,7 +1623,15 @@ dialog::backdrop {
   }
 
   .activity-panel {
+    height: auto;
+    overflow: visible;
     border-top: 1px solid var(--line);
+  }
+
+  #progress-panel,
+  #issues-panel,
+  #reports-panel {
+    height: auto;
   }
 
   .table-scroll {
@@ -1471,7 +1669,21 @@ dialog::backdrop {
   }
 
   .brand-group p,
-  .connection-state {
+  .connection-state,
+  .project-list-state {
+    display: none;
+  }
+
+  .topbar-actions {
+    gap: 6px;
+  }
+
+  .topbar-command {
+    width: 34px;
+    padding: 0;
+  }
+
+  .topbar-command span {
     display: none;
   }
 
@@ -1480,6 +1692,14 @@ dialog::backdrop {
     flex-direction: column;
     gap: 12px;
     padding: 12px;
+  }
+
+  .field-band {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+
+  .field-band-title {
+    padding: 8px 12px;
   }
 
   .seed-control {
@@ -1527,7 +1747,7 @@ dialog::backdrop {
   }
 
   .file-grid {
-    grid-template-columns: repeat(5, 102px);
+    grid-template-columns: repeat(7, 102px);
   }
 
   .activity-panel {

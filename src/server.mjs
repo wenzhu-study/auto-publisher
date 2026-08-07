@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { randomUUID } from 'node:crypto'
@@ -7,6 +8,7 @@ import { executeBatch, checkSites } from './batch.mjs'
 import { DEFAULT_KEYHUB_URL, IMAGE_FIELDS } from './constants.mjs'
 import { scanImageProjects } from './images.mjs'
 import { fetchShopProjects, matchImageProjects, readProjectMap } from './projects.mjs'
+import { matchImportedProjects } from './project-list.mjs'
 import { createSeed } from './random.mjs'
 import { buildResumeState } from './resume.mjs'
 
@@ -14,11 +16,14 @@ const HOST = process.env.UI_HOST || '127.0.0.1'
 const PORT = positiveInteger(process.env.UI_PORT) || 3580
 const ROOT = process.cwd()
 const WEB_DIR = path.join(ROOT, 'web')
-const IMAGES_DIR = path.resolve(ROOT, process.env.IMAGES_DIR || '图片')
+const DEFAULT_IMAGES_DIR = path.resolve(ROOT, process.env.IMAGES_DIR || '图片')
+const SETTINGS_PATH = path.join(ROOT, 'logs', 'local-settings.json')
+const SETTINGS_FILE = path.basename(SETTINGS_PATH)
 const MAP_PATH = path.resolve(ROOT, process.env.PROJECT_MAP || 'project-map.json')
 const KEYHUB_URL = process.env.KEYHUB_URL || DEFAULT_KEYHUB_URL
 const jobs = new Map()
 let activeJobId = ''
+let imagesDir = await loadImagesDirectory()
 
 const server = createServer(async (request, response) => {
   try {
@@ -39,23 +44,70 @@ server.listen(PORT, HOST, () => {
 })
 
 async function handleApi(request, response, url) {
+  if (request.method === 'POST' && url.pathname === '/api/images-directory/browser-select') {
+    const runningJob = activeJobId ? jobs.get(activeJobId) : null
+    if (runningJob?.status === 'running') {
+      return sendJson(response, 409, { ok: false, error: '任务运行期间不能切换图片文件夹' })
+    }
+    const body = await readJsonBody(request)
+    const selectedPath = await resolveBrowserSelectedDirectory(body.rootName, body.relativePaths)
+    imagesDir = await validateImagesDirectory(selectedPath)
+    await saveImagesDirectory(imagesDir)
+    await dismissResumeHistory()
+    return sendJson(response, 200, { ok: true, imagesDir, imagesDirAvailable: true })
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/images-directory/select') {
+    return sendJson(response, 410, { ok: false, error: '文件夹选择方式已更新，请刷新页面后重试' })
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/resume/dismiss') {
+    await dismissResumeHistory()
+    return sendJson(response, 200, { ok: true })
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/config') {
     return sendJson(response, 200, {
       ok: true,
-      imagesDir: IMAGES_DIR,
+      imagesDir,
       keyHubUrl: KEYHUB_URL,
-      fields: IMAGE_FIELDS.map(({ key, label, prefix, pageSlug }) => ({ key, label, prefix, pageSlug })),
+      features: {
+        fieldSelection: true,
+        projectListImport: true,
+        projectListLocalUrls: true,
+        directoryPicker: true,
+        browserDirectoryPicker: true,
+        imageFieldSchema: 8
+      },
+      fields: IMAGE_FIELDS.map(({ key, label, prefix, pageSlug, ratio, optional, targetType }) => ({
+        key,
+        label,
+        prefix,
+        pageSlug,
+        ratio,
+        optional: Boolean(optional),
+        targetType: targetType || 'acf-field'
+      })),
+      imagesDirAvailable: await isDirectory(imagesDir),
       seed: createSeed()
     })
   }
 
-  if (request.method === 'GET' && url.pathname === '/api/plan') {
-    const seed = url.searchParams.get('seed') || createSeed()
-    const plan = await buildPlan(seed)
+  if (['GET', 'POST'].includes(request.method) && url.pathname === '/api/plan') {
+    const body = request.method === 'POST' ? await readJsonBody(request) : {}
+    const seed = String(body.seed || url.searchParams.get('seed') || '').trim() || createSeed()
+    const fieldKeys = request.method === 'POST'
+      ? normalizeFieldKeys(body.fields)
+      : url.searchParams.has('fields')
+        ? normalizeFieldKeys(url.searchParams.get('fields')?.split(',') || [])
+        : IMAGE_FIELDS.map((field) => field.key)
+    const projectText = normalizeProjectText(body.projectText)
+    const plan = await buildPlan(seed, fieldKeys, projectText)
     return sendJson(response, 200, {
       ok: true,
       seed: plan.seed,
       summary: plan.summary,
+      importSummary: plan.importSummary,
       projects: plan.projects
     })
   }
@@ -109,7 +161,12 @@ async function handleApi(request, response, url) {
     }
 
     const seed = String(body.seed || '').trim() || createSeed()
-    const plan = await buildPlan(seed)
+    const fieldKeys = normalizeFieldKeys(body.fields)
+    if (!fieldKeys.length) {
+      return sendJson(response, 400, { ok: false, error: '请至少选择一个图片分类' })
+    }
+    const projectText = normalizeProjectText(body.projectText)
+    const plan = await buildPlan(seed, fieldKeys, projectText)
     const requested = new Set(Array.isArray(body.projects) ? body.projects.map(String) : [])
     const selected = requested.size
       ? plan.internal.filter((item) => requested.has(item.folderName))
@@ -122,18 +179,21 @@ async function handleApi(request, response, url) {
     const resumeFields = body.resumeFields && typeof body.resumeFields === 'object' && !Array.isArray(body.resumeFields)
       ? body.resumeFields
       : {}
-    const allowedFields = new Set(IMAGE_FIELDS.map((field) => field.key))
+    const allowedFields = new Set(fieldKeys)
     const executionSelected = selected.map((item) => {
       const requestedFields = Array.isArray(resumeFields[item.folderName])
         ? [...new Set(resumeFields[item.folderName].map(String).filter((field) => allowedFields.has(field)))]
         : []
-      return requestedFields.length ? { ...item, fieldsToProcess: requestedFields } : item
+      return { ...item, fieldsToProcess: requestedFields.length ? requestedFields : fieldKeys }
     })
 
     const job = {
       id: randomUUID(),
       mode,
       seed,
+      projectText,
+      projectListName: String(body.projectListName || '').slice(0, 200),
+      importSummary: plan.importSummary,
       status: 'running',
       cancelRequested: false,
       total: executionSelected.length,
@@ -166,18 +226,29 @@ async function handleApi(request, response, url) {
   sendJson(response, 404, { ok: false, error: '接口不存在' })
 }
 
-async function buildPlan(seed) {
+async function buildPlan(seed, fieldKeys = IMAGE_FIELDS.map((field) => field.key), projectText = '') {
   const [imageProjects, keyHubProjects, projectMap] = await Promise.all([
-    scanImageProjects(IMAGES_DIR, seed),
+    scanImageProjects(imagesDir, seed, fieldKeys, { allowMissingRoot: Boolean(projectText) }),
     fetchShopProjects(KEYHUB_URL),
     readProjectMap(MAP_PATH)
   ])
-  const internal = matchImageProjects(imageProjects, keyHubProjects, projectMap)
+  const imported = projectText
+    ? matchImportedProjects(
+        imageProjects,
+        keyHubProjects,
+        projectMap,
+        projectText,
+        IMAGE_FIELDS.map((field) => field.key)
+      )
+    : null
+  const internal = (imported?.projects || matchImageProjects(imageProjects, keyHubProjects, projectMap))
+    .map((item) => ({ ...item, fieldsToProcess: fieldKeys }))
   const projects = internal.map(toPublicPlanItem)
   const valid = projects.filter((item) => item.valid).length
   return {
     seed,
     summary: { total: projects.length, valid, invalid: projects.length - valid },
+    importSummary: imported?.summary || null,
     projects,
     internal
   }
@@ -209,7 +280,7 @@ async function runJob(job, selected) {
   const shouldContinue = () => !job.cancelRequested
   job.results = job.mode === 'upload'
     ? await executeBatch(selected, onProgress, shouldContinue)
-    : await checkSites(selected, onProgress, 5, shouldContinue)
+    : await checkSites(selected, onProgress, job.projectText ? 1 : 5, shouldContinue)
   job.finishedAt = new Date().toISOString()
   job.status = job.cancelRequested ? 'cancelled' : job.failed ? 'completed-with-errors' : 'completed'
   await queueJobReport(job)
@@ -229,6 +300,9 @@ function publicJob(job) {
     id: job.id,
     mode: job.mode,
     seed: job.seed,
+    projectText: job.projectText,
+    projectListName: job.projectListName,
+    importSummary: job.importSummary,
     status: job.status,
     cancelRequested: job.cancelRequested,
     total: job.total,
@@ -252,7 +326,10 @@ function toPublicPlanItem(item) {
   return {
     folderName: item.folderName,
     projectName: item.project?.name || '',
-    siteUrl: item.project?.url || '',
+    siteUrl: item.project?.url || item.importUrl || '',
+    importOrder: item.importOrder || null,
+    importName: item.importName || '',
+    importUrl: item.importUrl || '',
     valid: !item.matchError && item.issues.length === 0,
     issues: [item.matchError, ...item.issues].filter(Boolean),
     processFields: Array.isArray(item.fieldsToProcess)
@@ -274,6 +351,9 @@ async function writeJobReport(job) {
   }
   const report = {
     mode: job.mode,
+    projectListName: job.projectListName,
+    importSummary: job.importSummary,
+    projectText: job.projectText,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     seed: job.seed,
@@ -303,7 +383,7 @@ function queueJobReport(job) {
 async function listReports() {
   const logsDir = path.join(ROOT, 'logs')
   try {
-    const names = (await readdir(logsDir)).filter((name) => name.endsWith('.json')).sort().reverse().slice(0, 30)
+    const names = (await readdir(logsDir)).filter(isReportFile).sort().reverse().slice(0, 30)
     return Promise.all(names.map(async (name) => {
       const filePath = path.join(logsDir, name)
       try {
@@ -357,7 +437,7 @@ async function findLatestResume() {
     throw error
   }
 
-  const candidates = await Promise.all(names.filter((name) => name.endsWith('.json')).map(async (name) => {
+  const candidates = await Promise.all(names.filter(isReportFile).map(async (name) => {
     const filePath = path.join(logsDir, name)
     try {
       const [content, info] = await Promise.all([readFile(filePath, 'utf8'), stat(filePath)])
@@ -370,6 +450,9 @@ async function findLatestResume() {
     .filter((candidate) => candidate?.report?.mode === 'upload')
     .sort((left, right) => right.modifiedAt - left.modifiedAt)[0]
   if (!latestUpload) return null
+
+  const settings = await readLocalSettings()
+  if (latestUpload.modifiedAt <= Number(settings.resumeDismissedBefore || 0)) return null
 
   const activeJob = activeJobId ? jobs.get(activeJobId) : null
   return buildResumeState(latestUpload.report, latestUpload.name, {
@@ -420,6 +503,111 @@ async function serveStatic(response, pathname) {
   }
 }
 
+async function loadImagesDirectory() {
+  if (process.env.IMAGES_DIR) return DEFAULT_IMAGES_DIR
+  try {
+    const settings = await readLocalSettings()
+    return await validateImagesDirectory(settings.imagesDir)
+  } catch {
+    return DEFAULT_IMAGES_DIR
+  }
+}
+
+async function saveImagesDirectory(directory) {
+  await updateLocalSettings({ imagesDir: directory })
+}
+
+async function dismissResumeHistory() {
+  await updateLocalSettings({ resumeDismissedBefore: Date.now() })
+  const activeJob = activeJobId ? jobs.get(activeJobId) : null
+  if (activeJob?.status !== 'running') activeJobId = ''
+}
+
+async function readLocalSettings() {
+  try {
+    const settings = JSON.parse(await readFile(SETTINGS_PATH, 'utf8'))
+    return settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {}
+  } catch (error) {
+    if (error.code === 'ENOENT') return {}
+    return {}
+  }
+}
+
+async function updateLocalSettings(patch) {
+  const settings = { ...(await readLocalSettings()), ...patch }
+  await mkdir(path.dirname(SETTINGS_PATH), { recursive: true })
+  await writeFile(SETTINGS_PATH, `${JSON.stringify(settings, null, 2)}\n`, 'utf8')
+}
+
+async function validateImagesDirectory(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('图片文件夹路径为空')
+  const directory = path.resolve(value.trim())
+  const info = await stat(directory).catch(() => null)
+  if (!info?.isDirectory()) throw new Error(`图片文件夹不存在：${directory}`)
+  return directory
+}
+
+async function isDirectory(value) {
+  const info = await stat(value).catch(() => null)
+  return Boolean(info?.isDirectory())
+}
+
+async function resolveBrowserSelectedDirectory(rootNameValue, relativePathValues) {
+  const rootName = String(rootNameValue || '').trim()
+  if (!rootName || path.basename(rootName) !== rootName || ['.', '..'].includes(rootName)) {
+    throw new Error('浏览器返回的图片文件夹名称无效')
+  }
+
+  const relativePaths = [...new Set(Array.isArray(relativePathValues) ? relativePathValues : [])]
+    .map(normalizeBrowserRelativePath)
+    .filter(Boolean)
+    .slice(0, 80)
+  if (!relativePaths.length) throw new Error('选择的文件夹中没有可读取的文件')
+
+  const candidateBases = directoryCandidateBases()
+  const candidates = new Set()
+  for (const base of candidateBases) {
+    if (path.basename(base).toLocaleLowerCase('zh-CN') === rootName.toLocaleLowerCase('zh-CN')) {
+      candidates.add(path.resolve(base))
+    }
+    candidates.add(path.resolve(base, rootName))
+  }
+
+  const matches = []
+  for (const candidate of candidates) {
+    if (!await isDirectory(candidate)) continue
+    const probesMatch = await Promise.all(relativePaths.map((relativePath) =>
+      stat(path.join(candidate, relativePath)).then((info) => info.isFile()).catch(() => false)))
+    if (probesMatch.every(Boolean)) matches.push(candidate)
+  }
+
+  if (matches.length === 1) return matches[0]
+  if (matches.length > 1) throw new Error(`找到多个同名图片文件夹：${rootName}，请保留唯一目录后重试`)
+  throw new Error(`本地服务无法定位所选文件夹“${rootName}”，请将它放在项目同级目录或桌面后重试`)
+}
+
+function normalizeBrowserRelativePath(value) {
+  const segments = String(value || '').replaceAll('\\', '/').split('/').filter(Boolean)
+  if (segments.length < 2 || segments.some((segment) => segment === '.' || segment === '..')) return ''
+  return path.join(...segments.slice(1))
+}
+
+function directoryCandidateBases() {
+  const values = [ROOT, imagesDir, os.homedir()]
+  let current = ROOT
+  while (true) {
+    values.push(current)
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  for (const base of [os.homedir(), process.env.USERPROFILE, process.env.OneDrive]) {
+    if (!base) continue
+    values.push(base, path.join(base, 'Desktop'), path.join(base, 'Downloads'), path.join(base, 'Documents'), path.join(base, 'Pictures'))
+  }
+  return [...new Set(values.filter(Boolean).map((value) => path.resolve(value)))]
+}
+
 async function readJsonBody(request) {
   const chunks = []
   let size = 0
@@ -460,4 +648,17 @@ function contentType(filePath) {
 function positiveInteger(value) {
   const number = Number(value)
   return Number.isInteger(number) && number > 0 ? number : 0
+}
+
+function normalizeFieldKeys(values) {
+  const requested = new Set(Array.isArray(values) ? values.map(String) : [])
+  return IMAGE_FIELDS.map((field) => field.key).filter((key) => requested.has(key))
+}
+
+function normalizeProjectText(value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function isReportFile(name) {
+  return name !== SETTINGS_FILE && name.endsWith('.json')
 }

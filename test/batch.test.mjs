@@ -4,7 +4,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { executeBatch } from '../src/batch.mjs'
+import { checkSites, executeBatch } from '../src/batch.mjs'
 
 test('records each image result and continues after one upload fails', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'auto-publisher-batch-'))
@@ -18,19 +18,36 @@ test('records each image result and continues after one upload fails', async () 
   await Promise.all(Object.values(filenames).map((name) =>
     writeFile(path.join(root, name), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
   ))
+  const newImagePath = path.join(root, 'hot-products-3-1-1.png')
+  await writeFile(newImagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  const featuredImagePath = path.join(root, 'about-us-3-1-1.png')
+  await writeFile(featuredImagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
 
   const pageFields = {
     21: { ap_img: false, af_img: false, hp_img: false, mo_banner: [] },
-    22: {}
+    22: {},
+    24: { 'hot-products': false }
   }
   const uploadedFilenames = []
+  const requestedPageSlugs = []
+  let tagBanner = 0
+  let featuredMedia = 0
   let nextMediaId = 700
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost')
     if (request.method === 'GET' && url.pathname === '/wp-json/wp/v2/pages') {
       const slug = url.searchParams.get('slug')
+      requestedPageSlugs.push(slug || '*')
       if (slug === 'about-us') return json(response, 200, [{ id: 21, slug, acf: pageFields[21] }])
       if (slug === 'price-list') return json(response, 200, [{ id: 22, slug, acf: pageFields[22] }])
+      if (!slug) return json(response, 200, [
+        { id: 21, slug: 'about-us', acf: pageFields[21], featured_media: featuredMedia },
+        { id: 22, slug: 'price-list', acf: pageFields[22] },
+        { id: 24, slug: 'home', acf: pageFields[24] }
+      ])
+    }
+    if (request.method === 'GET' && url.pathname === '/wp-json/wc/v3/products/tags') {
+      return json(response, 200, [{ id: 41, slug: 'hot-products', name: 'Hot Products' }])
     }
     if (request.method === 'POST' && url.pathname === '/wp-json/wp/v2/media') {
       const disposition = request.headers['content-disposition'] || ''
@@ -47,11 +64,20 @@ test('records each image result and continues after one upload fails', async () 
     if (pageMatch && request.method === 'POST') {
       const pageId = Number(pageMatch[1])
       const payload = JSON.parse((await readBody(request)).toString('utf8'))
+      if (payload.featured_media != null) featuredMedia = Number(payload.featured_media)
       Object.assign(pageFields[pageId], payload.acf || {})
-      return json(response, 200, { id: pageId, acf: pageFields[pageId] })
+      return json(response, 200, { id: pageId, acf: pageFields[pageId], featured_media: featuredMedia })
     }
     if (pageMatch && request.method === 'GET') {
-      return json(response, 200, { acf: pageFields[Number(pageMatch[1])] })
+      return json(response, 200, { acf: pageFields[Number(pageMatch[1])], featured_media: featuredMedia })
+    }
+    if (request.method === 'POST' && url.pathname === '/wp-json/wp/v2/product_tag/41') {
+      const payload = JSON.parse((await readBody(request)).toString('utf8'))
+      tagBanner = Number(payload.acf?.category_banner)
+      return json(response, 200, { id: 41, acf: { category_banner: tagBanner } })
+    }
+    if (request.method === 'GET' && url.pathname === '/wp-json/wp/v2/product_tag/41') {
+      return json(response, 200, { id: 41, acf: { category_banner: tagBanner } })
     }
     return json(response, 404, { message: 'not found' })
   })
@@ -94,8 +120,50 @@ test('records each image result and continues after one upload fails', async () 
       () => {}
     )
     assert.equal(retryResult.status, 'completed')
+    assert.deepEqual(retryResult.processFields, ['pt_img'])
     assert.deepEqual(Object.keys(retryResult.imageResults), ['pt_img'])
     assert.deepEqual(uploadedFilenames, ['price-list-1.png'])
+
+    requestedPageSlugs.length = 0
+    const [checkResult] = await checkSites(
+      [{ ...projects[0], fieldsToProcess: ['pt_img'] }],
+      () => {}
+    )
+    assert.equal(checkResult.ok, true)
+    assert.deepEqual(checkResult.processFields, ['pt_img'])
+    assert.equal(requestedPageSlugs.includes('about-us'), false)
+    assert.equal(requestedPageSlugs.includes('price-list'), true)
+
+    uploadedFilenames.length = 0
+    const [newFieldResult] = await executeBatch(
+      [{ ...projects[0], selected: { 'hot-products': newImagePath }, fieldsToProcess: ['hot-products'] }],
+      () => {}
+    )
+    assert.equal(newFieldResult.status, 'completed')
+    assert.equal(newFieldResult.imageResults['hot-products'].status, 'succeeded')
+    assert.equal(newFieldResult.imageResults['hot-products'].targetId, 41)
+    assert.equal(newFieldResult.imageResults['hot-products'].targetType, 'tag-banner')
+    assert.equal(tagBanner > 0, true)
+    assert.deepEqual(uploadedFilenames, ['hot-products-3-1-1.png'])
+
+    uploadedFilenames.length = 0
+    const [featuredResult] = await executeBatch(
+      [{ ...projects[0], selected: { 'about-us': featuredImagePath }, fieldsToProcess: ['about-us'] }],
+      () => {}
+    )
+    assert.equal(featuredResult.status, 'completed')
+    assert.equal(featuredResult.imageResults['about-us'].targetId, 21)
+    assert.equal(featuredResult.imageResults['about-us'].targetType, 'page-featured')
+    assert.equal(featuredMedia > 0, true)
+    assert.deepEqual(uploadedFilenames, ['about-us-3-1-1.png'])
+
+    const [missingImageResult] = await executeBatch(
+      [{ ...projects[0], selected: { 'quality-control': null }, fieldsToProcess: ['quality-control'] }],
+      () => {}
+    )
+    assert.equal(missingImageResult.status, 'completed-with-warnings')
+    assert.equal(missingImageResult.imageResults['quality-control'].status, 'skipped')
+    assert.match(missingImageResult.imageResults['quality-control'].reason, /素材目录没有/)
   } finally {
     await rm(root, { recursive: true, force: true })
     await new Promise((resolve) => server.close(resolve))

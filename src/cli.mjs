@@ -65,7 +65,7 @@ try {
     console.log(`报告：${reportPath}`)
     process.exitCode = failures.length ? 1 : 0
   } else {
-    console.log(`\n即将依次处理 ${matched.length} 个项目，每个项目上传 5 张图片。`)
+    console.log(`\n即将依次处理 ${matched.length} 个项目，并按 ${IMAGE_FIELDS.length} 个图片分类记录或上传素材。`)
     const results = await executeBatch(matched, printProgress)
     const report = buildReport({ mode: 'execute', startedAt, seed, imagesDir, plan, results })
     const reportPath = await writeReport(cwd, report)

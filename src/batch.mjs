@@ -4,7 +4,10 @@ import {
   findPage,
   getMissingImageFields,
   preflightSite,
+  resolvePublisherTargets,
   updateAndVerifyImageFields,
+  updateAndVerifyPageFeaturedImage,
+  updateAndVerifyTagBanner,
   uploadMedia
 } from './wordpress.mjs'
 
@@ -18,14 +21,45 @@ export async function checkSites(projects, onProgress = () => {}, concurrency = 
       const item = projects[index]
       onProgress({ index, total: projects.length, item, stage: 'checking' })
       try {
-        const pages = await preflightSite(item.project)
-        if (pages.missingFields.length === IMAGE_FIELDS.length) {
-          throw new Error('站点未定义任何目标图片字段，已在上传前阻止该项目')
+        const targetFields = IMAGE_FIELDS.filter((field) =>
+          !Array.isArray(item.fieldsToProcess) || item.fieldsToProcess.includes(field.key))
+        if (!targetFields.length) throw new Error('当前项目没有需要检查的图片字段')
+        const fixedFields = targetFields.filter((field) => !field.targetType)
+        const publisherFields = targetFields.filter((field) => field.targetType)
+        const [fixedPages, publisherTargets] = await Promise.all([
+          fixedFields.length
+            ? preflightSite(item.project, { fields: fixedFields.map((field) => field.key) })
+            : Promise.resolve({ aboutPageId: null, priceListPageId: null, missingFields: [] }),
+          publisherFields.length
+            ? resolvePublisherTargets(item.project, publisherFields)
+            : Promise.resolve({})
+        ])
+        const targetIssues = Object.fromEntries(Object.entries(publisherTargets)
+          .filter(([, value]) => !value.target)
+          .map(([key, value]) => [key, value.reason]))
+        const missingFields = [
+          ...fixedPages.missingFields,
+          ...Object.keys(targetIssues)
+        ]
+        if (missingFields.length === targetFields.length) {
+          throw new Error(`站点没有可写入的图片目标：${Object.values(targetIssues).join('；') || missingFields.join('、')}`)
         }
-        const warnings = pages.missingFields.length
-          ? [`站点缺少图片字段：${pages.missingFields.join('、')}`]
+        const warnings = missingFields.length
+          ? [`站点缺少图片目标：${missingFields.map((field) => targetIssues[field] || field).join('；')}`]
           : []
-        results[index] = { folderName: item.folderName, projectName: item.project.name, ok: true, pages, warnings }
+        results[index] = {
+          folderName: item.folderName,
+          projectName: item.project.name,
+          ok: true,
+          processFields: targetFields.map((field) => field.key),
+          pages: {
+            ...fixedPages,
+            targets: Object.fromEntries(Object.entries(publisherTargets)
+              .filter(([, value]) => value.target)
+              .map(([key, value]) => [key, value.target]))
+          },
+          warnings
+        }
         onProgress({
           index,
           total: projects.length,
@@ -75,24 +109,9 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
 
     try {
       if (!targetFields.length) throw new Error('当前项目没有需要处理的图片字段')
-      const needsAboutPage = targetFields.some((field) => field.pageKey === 'about')
-      const needsPriceListPage = targetFields.some((field) => field.pageKey === 'price-list')
-      const [aboutPage, priceListPage] = await Promise.all([
-        needsAboutPage
-          ? findPage(item.project, 'about-us', { expectedFields: ['ap_img', 'af_img', 'hp_img', 'mo_banner'] })
-          : Promise.resolve(null),
-        needsPriceListPage
-          ? findPage(item.project, 'price-list', { expectedFields: ['pt_img'] })
-          : Promise.resolve(null)
-      ])
-      result.pages = {
-        ...(aboutPage ? { about: Number(aboutPage.id) } : {}),
-        ...(priceListPage ? { priceList: Number(priceListPage.id) } : {})
-      }
-      const missingFields = getMissingImageFields(aboutPage, priceListPage)
-        .filter((field) => targetFields.some((candidate) => candidate.key === field))
-      if (missingFields.length) {
-        result.warnings.push(`站点缺少图片字段，已跳过：${missingFields.join('、')}`)
+      const missingAssetFields = targetFields.filter((field) => !item.selected?.[field.key])
+      if (missingAssetFields.length) {
+        result.warnings.push(`素材缺失，已记录并跳过：${missingAssetFields.map((field) => field.label).join('、')}`)
         onProgress({
           index,
           total: projects.length,
@@ -101,10 +120,72 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
           stage: 'warning',
           message: result.warnings.at(-1)
         })
-        for (const field of targetFields.filter((candidate) => missingFields.includes(candidate.key))) {
+        for (const field of missingAssetFields) {
           const imageResult = result.imageResults[field.key]
           imageResult.status = 'skipped'
-          imageResult.reason = `站点未定义字段 ${field.key}`
+          imageResult.reason = `素材目录没有 ${field.label} 图片`
+          imageResult.finishedAt = new Date().toISOString()
+          onProgress({
+            index,
+            total: projects.length,
+            item,
+            result,
+            stage: 'image-skipped',
+            field,
+            filename: '',
+            message: `${field.label}：没有图片，已记录并跳过`
+          })
+        }
+      }
+
+      const uploadFields = targetFields.filter((field) => item.selected?.[field.key])
+      const fixedFields = uploadFields.filter((field) => !field.targetType)
+      const publisherFields = uploadFields.filter((field) => field.targetType)
+      const needsAboutPage = fixedFields.some((field) => field.pageKey === 'about')
+      const needsPriceListPage = fixedFields.some((field) => field.pageKey === 'price-list')
+      const aboutFieldKeys = fixedFields
+        .filter((field) => field.pageKey === 'about')
+        .map((field) => field.key)
+      const [aboutPage, priceListPage, publisherTargets] = await Promise.all([
+        needsAboutPage
+          ? findPage(item.project, 'about-us', { expectedFields: aboutFieldKeys })
+          : Promise.resolve(null),
+        needsPriceListPage
+          ? findPage(item.project, 'price-list', { expectedFields: ['pt_img'] })
+          : Promise.resolve(null),
+        publisherFields.length
+          ? resolvePublisherTargets(item.project, publisherFields)
+          : Promise.resolve({})
+      ])
+      result.pages = {
+        ...(aboutPage ? { about: Number(aboutPage.id) } : {}),
+        ...(priceListPage ? { priceList: Number(priceListPage.id) } : {}),
+        targets: Object.fromEntries(Object.entries(publisherTargets)
+          .filter(([, value]) => value.target)
+          .map(([key, value]) => [key, value.target]))
+      }
+      const targetIssues = Object.fromEntries(Object.entries(publisherTargets)
+        .filter(([, value]) => !value.target)
+        .map(([key, value]) => [key, value.reason]))
+      const missingFields = [
+        ...getMissingImageFields(aboutPage, priceListPage)
+          .filter((field) => fixedFields.some((candidate) => candidate.key === field)),
+        ...Object.keys(targetIssues)
+      ]
+      if (missingFields.length) {
+        result.warnings.push(`站点缺少图片目标，已跳过：${missingFields.map((field) => targetIssues[field] || field).join('；')}`)
+        onProgress({
+          index,
+          total: projects.length,
+          item,
+          result,
+          stage: 'warning',
+          message: result.warnings.at(-1)
+        })
+        for (const field of uploadFields.filter((candidate) => missingFields.includes(candidate.key))) {
+          const imageResult = result.imageResults[field.key]
+          imageResult.status = 'skipped'
+          imageResult.reason = targetIssues[field.key] || `站点未定义字段 ${field.key}`
           imageResult.finishedAt = new Date().toISOString()
           onProgress({
             index,
@@ -114,18 +195,31 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
             stage: 'image-skipped',
             field,
             filename: imageResult.filename,
-            message: `${imageResult.filename}：站点未定义字段 ${field.key}，已跳过`
+            message: `${imageResult.filename}：${imageResult.reason}，已跳过`
           })
         }
       }
 
-      const availableFields = targetFields.filter((field) => !missingFields.includes(field.key))
-      if (!availableFields.length) throw new Error('站点没有任何可写入的目标图片字段')
+      const availableFields = uploadFields.filter((field) => !missingFields.includes(field.key))
+      if (uploadFields.length && !availableFields.length) {
+        throw new Error('站点没有任何可写入的目标图片字段')
+      }
+      const targetByField = Object.fromEntries(availableFields.map((field) => {
+        if (field.targetType) return [field.key, publisherTargets[field.key].target]
+        return [field.key, {
+          id: field.pageKey === 'about' ? Number(aboutPage.id) : Number(priceListPage.id),
+          slug: field.pageSlug,
+          targetType: 'acf-field'
+        }]
+      }))
 
       for (const field of availableFields) {
         const imageResult = result.imageResults[field.key]
-        const pageId = field.pageKey === 'about' ? result.pages.about : result.pages.priceList
-        imageResult.pageId = pageId
+        const target = targetByField[field.key]
+        imageResult.targetId = target.id
+        imageResult.targetType = target.targetType
+        imageResult.pageId = target.targetType === 'tag-banner' ? null : target.id
+        imageResult.page = target.slug || ''
         imageResult.status = 'uploading'
         imageResult.startedAt = new Date().toISOString()
         onProgress({
@@ -176,7 +270,9 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
           continue
         }
 
-        const fieldValue = field.gallery ? [imageResult.mediaId] : imageResult.mediaId
+        const targetLabel = field.targetType === 'tag-banner'
+          ? '产品标签 category_banner'
+          : field.targetType === 'page-featured' ? '页面特色图片' : `字段 ${field.key}`
         imageResult.status = 'writing'
         onProgress({
           index,
@@ -186,14 +282,21 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
           stage: 'writing-image',
           field,
           filename: imageResult.filename,
-          message: `正在写入字段 ${field.key}，页面 ID ${pageId}`
+          message: `正在写入${targetLabel}，目标 ID ${target.id}`
         })
         try {
-          result.writes[field.key] = await updateAndVerifyImageFields(
-            item.project,
-            pageId,
-            { [field.key]: fieldValue }
-          )
+          if (field.targetType === 'tag-banner') {
+            result.writes[field.key] = await updateAndVerifyTagBanner(item.project, target.id, imageResult.mediaId)
+          } else if (field.targetType === 'page-featured') {
+            result.writes[field.key] = await updateAndVerifyPageFeaturedImage(item.project, target.id, imageResult.mediaId)
+          } else {
+            const fieldValue = field.gallery ? [imageResult.mediaId] : imageResult.mediaId
+            result.writes[field.key] = await updateAndVerifyImageFields(
+              item.project,
+              target.id,
+              { [field.key]: fieldValue }
+            )
+          }
           imageResult.status = 'succeeded'
           imageResult.writeMethod = result.writes[field.key].method
           imageResult.finishedAt = new Date().toISOString()
@@ -205,7 +308,7 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
             stage: 'image-succeeded',
             field,
             filename: imageResult.filename,
-            message: `${imageResult.filename} 已上传并写入 ${field.key}，媒体 ID ${imageResult.mediaId}`
+            message: `${imageResult.filename} 已上传并写入${targetLabel}，媒体 ID ${imageResult.mediaId}`
           })
         } catch (error) {
           imageResult.status = 'write-failed'
@@ -219,7 +322,7 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
             stage: 'write-failed',
             field,
             filename: imageResult.filename,
-            message: `${imageResult.filename} 已上传（媒体 ID ${imageResult.mediaId}），但字段 ${field.key} 写入失败：${error.message}`
+            message: `${imageResult.filename} 已上传（媒体 ID ${imageResult.mediaId}），但${targetLabel}写入失败：${error.message}`
           })
         }
       }
@@ -261,6 +364,8 @@ function createImageResults(selected, fields = IMAGE_FIELDS) {
     filename: selected?.[field.key] ? path.basename(selected[field.key]) : '',
     page: field.pageSlug,
     pageId: null,
+    targetType: field.targetType || 'acf-field',
+    targetId: null,
     status: 'pending',
     mediaId: null,
     mediaUrl: '',
