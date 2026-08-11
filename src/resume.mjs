@@ -16,6 +16,8 @@ export function buildResumeState(report, sourceReport = '', options = {}) {
     .filter((item) => item.folderName && selected.has(item.folderName))
     .map((item) => [item.folderName, item]))
   const retryFieldsByFolder = {}
+  const targetSlugsByFolder = {}
+  const notApplicableFieldsByFolder = {}
   const processedFolders = []
   for (const folder of selectedFolders) {
     const result = resultByFolder.get(folder)
@@ -24,6 +26,13 @@ export function buildResumeState(report, sourceReport = '', options = {}) {
       continue
     }
     const retryFields = getRetryFields(result)
+    const images = Object.values(result.imageResults || {})
+    const targetSlugs = Object.fromEntries(images
+      .filter((image) => image.status === 'succeeded' && image.field && image.page)
+      .map((image) => [image.field, image.page]))
+    const notApplicableFields = unique(images.filter(isNotApplicableImage).map((image) => image.field).filter(Boolean))
+    if (Object.keys(targetSlugs).length) targetSlugsByFolder[folder] = targetSlugs
+    if (notApplicableFields.length) notApplicableFieldsByFolder[folder] = notApplicableFields
     if (retryFields === null) continue
     if (retryFields.length) retryFieldsByFolder[folder] = retryFields
     else processedFolders.push(folder)
@@ -47,7 +56,9 @@ export function buildResumeState(report, sourceReport = '', options = {}) {
     selectedFields,
     processedFolders,
     remainingFolders,
-    retryFieldsByFolder
+    retryFieldsByFolder,
+    targetSlugsByFolder,
+    notApplicableFieldsByFolder
   }
 }
 
@@ -55,9 +66,14 @@ function getRetryFields(result) {
   const images = Object.values(result.imageResults || {})
   if (!images.length) return (result.status === 'failed' || result.ok === false) ? null : []
   return unique(images
-    .filter((image) => image.status !== 'succeeded')
+    .filter((image) => image.status !== 'succeeded' && !isNotApplicableImage(image))
     .map((image) => image.field)
     .filter(Boolean))
+}
+
+function isNotApplicableImage(image) {
+  return image?.status === 'not-applicable' ||
+    (image?.status === 'skipped' && /^找不到 (?:页面|产品标签) slug=/.test(String(image.reason || '')))
 }
 
 function unique(values) {

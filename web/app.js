@@ -59,6 +59,8 @@ async function boot() {
         !config.features?.projectListLocalUrls ||
         !config.features?.retryProblemsAfterCompletion ||
         !config.features?.publisherTargetPagination ||
+        !config.features?.targetAwareImageStatuses ||
+        !config.features?.duplicateUrlNameDisambiguation ||
         !config.features?.directoryPicker || !config.features?.browserDirectoryPicker ||
         config.features?.imageFieldSchema !== 8) {
       throw new Error('本地服务需要重启后才能使用最新图片分类')
@@ -337,17 +339,23 @@ function renderProjects() {
     const alias = project.projectName && project.folderName !== project.projectName
       ? `<span class="project-site folder-alias">素材目录：${escapeHtml(project.folderName)}</span>`
       : ''
-    const files = state.fields.map(({ key, label: fullLabel }) => {
-      const label = FIELD_LABELS[key] || fullLabel
+    const files = state.fields.map(({ key, label: fullLabel, ratio, targetType }) => {
+      const targetSlug = targetType !== 'acf-field' ? successfulTargetSlug(project.folderName, key) : ''
+      const label = targetSlug && targetSlug !== key ? `${targetSlug} · ${ratio}` : FIELD_LABELS[key] || fullLabel
       const isSelected = state.selectedFields.has(key)
+      const notApplicable = isFieldNotApplicable(project.folderName, key)
       const fieldState = !isSelected
         ? 'excluded'
+        : notApplicable
+        ? 'not-applicable'
         : retryFields.size
         ? retryFields.has(key) ? 'retry' : 'already-complete'
         : ''
       const count = project.counts[key] || 0
       const fieldNote = fieldState === 'excluded'
         ? '未选择'
+        : fieldState === 'not-applicable'
+        ? '目标不存在，已跳过'
         : fieldState === 'retry'
         ? '待修复'
         : fieldState ? '已成功，不重传' : count ? `${count} 选 1` : '0 张'
@@ -393,6 +401,28 @@ function renderProjects() {
   elements['select-all'].indeterminate = selectedVisible > 0 && selectedVisible < selectable.length
   elements['select-all'].disabled = isRunning() || selectable.length === 0
   updateSelectionSummary()
+}
+
+function successfulTargetSlug(folderName, fieldKey) {
+  const image = activeImageResult(folderName, fieldKey)
+  if (image?.status === 'succeeded' && image.page) return image.page
+  return state.resume?.targetSlugsByFolder?.[folderName]?.[fieldKey] || ''
+}
+
+function isFieldNotApplicable(folderName, fieldKey) {
+  const image = activeImageResult(folderName, fieldKey)
+  return isNotApplicableImage(image) ||
+    Boolean(state.resume?.notApplicableFieldsByFolder?.[folderName]?.includes(fieldKey))
+}
+
+function activeImageResult(folderName, fieldKey) {
+  const result = (state.activeJob?.results || []).find((item) => item?.folderName === folderName)
+  return result?.imageResults?.[fieldKey] || null
+}
+
+function isNotApplicableImage(image) {
+  return image?.status === 'not-applicable' ||
+    (image?.status === 'skipped' && /^找不到 (?:页面|产品标签) slug=/.test(String(image.reason || '')))
 }
 
 function filteredProjects() {
@@ -551,6 +581,8 @@ function applyResumeFromJob(job) {
   const resultByFolder = new Map((job.results || []).filter(Boolean).map((result) => [result.folderName, result]))
   const processedFolders = []
   const retryFieldsByFolder = {}
+  const targetSlugsByFolder = {}
+  const notApplicableFieldsByFolder = {}
   for (const folder of selectedFolders) {
     const result = resultByFolder.get(folder)
     if (!result) continue
@@ -560,9 +592,15 @@ function applyResumeFromJob(job) {
       continue
     }
     const retryFields = [...new Set(images
-      .filter((image) => image.status !== 'succeeded')
+      .filter((image) => image.status !== 'succeeded' && !isNotApplicableImage(image))
       .map((image) => image.field)
       .filter(Boolean))]
+    const targetSlugs = Object.fromEntries(images
+      .filter((image) => image.status === 'succeeded' && image.field && image.page)
+      .map((image) => [image.field, image.page]))
+    const notApplicableFields = [...new Set(images.filter(isNotApplicableImage).map((image) => image.field).filter(Boolean))]
+    if (Object.keys(targetSlugs).length) targetSlugsByFolder[folder] = targetSlugs
+    if (notApplicableFields.length) notApplicableFieldsByFolder[folder] = notApplicableFields
     if (retryFields.length) retryFieldsByFolder[folder] = retryFields
     else processedFolders.push(folder)
   }
@@ -583,7 +621,9 @@ function applyResumeFromJob(job) {
     importSummary: job.importSummary || null,
     processedFolders,
     remainingFolders,
-    retryFieldsByFolder
+    retryFieldsByFolder,
+    targetSlugsByFolder,
+    notApplicableFieldsByFolder
   } : null
   state.seed = job.seed
   if (state.resume?.selectedFields?.length) {
@@ -783,6 +823,7 @@ function reportImageStatusLabel(status) {
     'upload-failed': '上传失败',
     'write-failed': '写入失败',
     skipped: '已跳过',
+    'not-applicable': '目标不存在',
     'not-processed': '未处理',
     uploading: '上传中',
     uploaded: '已上传',
@@ -794,7 +835,7 @@ function reportImageStatusLabel(status) {
 function reportImageStatusClass(status) {
   if (status === 'succeeded') return 'success'
   if (['upload-failed', 'write-failed'].includes(status)) return 'error'
-  if (status === 'skipped') return 'warning'
+  if (['skipped', 'not-applicable'].includes(status)) return 'warning'
   return 'neutral'
 }
 
@@ -833,7 +874,7 @@ function renderIssues(forceReport = false) {
 function collectProblemGroups(results) {
   return (results || []).filter(Boolean).map((project) => {
     const images = Object.values(project.imageResults || {})
-      .filter((image) => PROBLEM_IMAGE_STATUSES.has(image.status))
+      .filter((image) => PROBLEM_IMAGE_STATUSES.has(image.status) && !isNotApplicableImage(image))
     const projectOnlyFailure = (project.status === 'failed' || project.ok === false) && images.length === 0
     if (!images.length && !projectOnlyFailure) return null
     return { project, images, projectOnlyFailure }

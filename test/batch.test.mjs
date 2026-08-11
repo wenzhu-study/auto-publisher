@@ -181,7 +181,8 @@ test('records each image result and continues after one upload fails', async () 
       }
     ], () => {})
     assert.equal(continuedResults.length, 2)
-    assert.equal(continuedResults[0].status, 'failed')
+    assert.equal(continuedResults[0].status, 'completed-with-warnings')
+    assert.equal(continuedResults[0].imageResults['quality-control'].status, 'not-applicable')
     assert.equal(continuedResults[1].status, 'completed')
     assert.deepEqual(uploadedFilenames, ['about-us-3-1-1.png'])
   } finally {

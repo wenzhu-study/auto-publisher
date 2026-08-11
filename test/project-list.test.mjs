@@ -96,6 +96,25 @@ test('uses a unique project name when KeyHub projects share a local URL', () => 
   assert.equal(result.projects[0].project.url, localUrl)
 })
 
+test('uses a unique project name to disambiguate duplicate public URLs', () => {
+  const publicUrl = 'https://www.china-t-shirts.com/'
+  const result = matchImportedProjects(
+    [imageProject('T恤')],
+    [
+      credential('1', 'tshirt', publicUrl),
+      credential('2', 'T恤', 'https://www.china-t-shirts.com')
+    ],
+    {},
+    'T恤：https://www.china-t-shirts.com',
+    ['home']
+  )
+
+  assert.equal(result.summary.matched, 1)
+  assert.equal(result.projects[0].matchError, '')
+  assert.equal(result.projects[0].project.id, '2')
+  assert.equal(result.projects[0].project.name, 'T恤')
+})
+
 test('uses the TXT local URL as the upload target while retaining KeyHub credentials', () => {
   const localUrl = 'http://10.0.0.25:8088/'
   const result = matchImportedProjects(

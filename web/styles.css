@@ -613,6 +613,13 @@ tbody tr.selected {
   border-style: dashed;
 }
 
+.file-item.not-applicable {
+  opacity: 0.65;
+  background: #eef1f3;
+  border-color: #d8dde1;
+  border-style: dashed;
+}
+
 .file-item b,
 .file-item span {
   display: block;

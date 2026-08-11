@@ -184,7 +184,7 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
         })
         for (const field of uploadFields.filter((candidate) => missingFields.includes(candidate.key))) {
           const imageResult = result.imageResults[field.key]
-          imageResult.status = 'skipped'
+          imageResult.status = 'not-applicable'
           imageResult.reason = targetIssues[field.key] || `站点未定义字段 ${field.key}`
           imageResult.finishedAt = new Date().toISOString()
           onProgress({
@@ -201,9 +201,6 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
       }
 
       const availableFields = uploadFields.filter((field) => !missingFields.includes(field.key))
-      if (uploadFields.length && !availableFields.length) {
-        throw new Error('站点没有任何可写入的目标图片字段')
-      }
       const targetByField = Object.fromEntries(availableFields.map((field) => {
         if (field.targetType) return [field.key, publisherTargets[field.key].target]
         return [field.key, {
@@ -402,11 +399,12 @@ function summarizeImageResults(imageResults) {
     total: values.length,
     succeeded: values.filter((image) => image.status === 'succeeded').length,
     failed: failedFields.length,
-    skipped: values.filter((image) => image.status === 'skipped').length,
+    skipped: values.filter((image) => ['skipped', 'not-applicable'].includes(image.status)).length,
+    notApplicable: values.filter((image) => image.status === 'not-applicable').length,
     notProcessed: values.filter((image) => image.status === 'not-processed').length,
     successfulFields: values.filter((image) => image.status === 'succeeded').map((image) => image.field),
     failedFields,
-    skippedFields: values.filter((image) => image.status === 'skipped').map((image) => image.field)
+    skippedFields: values.filter((image) => ['skipped', 'not-applicable'].includes(image.status)).map((image) => image.field)
   }
 }
 

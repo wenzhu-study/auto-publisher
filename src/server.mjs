@@ -77,6 +77,8 @@ async function handleApi(request, response, url) {
         projectListLocalUrls: true,
         retryProblemsAfterCompletion: true,
         publisherTargetPagination: true,
+        targetAwareImageStatuses: true,
+        duplicateUrlNameDisambiguation: true,
         directoryPicker: true,
         browserDirectoryPicker: true,
         imageFieldSchema: 8
@@ -402,7 +404,7 @@ async function listReports() {
           warnings: report.warnings ?? 0,
           imageSucceeded: report.imageSucceeded ?? countReportImages(report, 'succeeded'),
           imageFailed: report.imageFailed ?? countReportImages(report, ['upload-failed', 'write-failed']),
-          imageSkipped: report.imageSkipped ?? countReportImages(report, 'skipped'),
+          imageSkipped: report.imageSkipped ?? countReportImages(report, ['skipped', 'not-applicable']),
           issues: countReportProblems(report),
           status: report.status || ''
         }
@@ -473,10 +475,15 @@ function countReportProblems(report) {
   return (report.results || []).reduce((count, result) => {
     if (!result) return count
     const images = Object.values(result.imageResults || {})
-      .filter((image) => problemStatuses.has(image.status)).length
+      .filter((image) => problemStatuses.has(image.status) && !isNotApplicableImageResult(image)).length
     if (images) return count + images
     return count + ((result.status === 'failed' || result.ok === false) ? 1 : 0)
   }, 0)
+}
+
+function isNotApplicableImageResult(image) {
+  return image?.status === 'not-applicable' ||
+    (image?.status === 'skipped' && /^找不到 (?:页面|产品标签) slug=/.test(String(image.reason || '')))
 }
 
 function countSuccessfulProjects(report) {

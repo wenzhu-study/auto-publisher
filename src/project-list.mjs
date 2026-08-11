@@ -140,6 +140,15 @@ function resolveCredential(entry, projects) {
     return { project: null, error: `KeyHub 中找不到项目：${entry.name} / ${entry.url}` }
   }
   if (urlMatches.length > 1) {
+    if (nameMatches.length > 1) {
+      return { project: null, error: `KeyHub 中项目名匹配不唯一：${entry.name}` }
+    }
+    if (nameMatches.length === 1) {
+      if (urlMatches.some((project) => project.id === nameMatches[0].id)) {
+        return { project: nameMatches[0], error: '' }
+      }
+      return { project: null, error: `项目名称与网址指向不同的 KeyHub 项目：${entry.name}` }
+    }
     return { project: null, error: `KeyHub 中网址匹配不唯一：${entry.url}` }
   }
   if (urlMatches.length === 1) {

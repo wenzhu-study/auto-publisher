@@ -90,3 +90,24 @@ test('does not offer active running checkpoints while the task is still active',
     ['项目一']
   )
 })
+
+test('does not retry missing site targets and keeps successful target slugs', () => {
+  const resume = buildResumeState({
+    mode: 'upload',
+    status: 'completed-with-errors',
+    plan: [{ folderName: '项目一', processFields: ['oem', 'order-terms', 'quality-control'] }],
+    results: [{
+      folderName: '项目一',
+      status: 'failed',
+      imageResults: {
+        oem: { field: 'oem', status: 'skipped', reason: '找不到 页面 slug=oem' },
+        'order-terms': { field: 'order-terms', status: 'succeeded', page: 'order-terms' },
+        'quality-control': { field: 'quality-control', status: 'write-failed', page: 'quality-control' }
+      }
+    }]
+  })
+
+  assert.deepEqual(resume.retryFieldsByFolder, { 项目一: ['quality-control'] })
+  assert.deepEqual(resume.notApplicableFieldsByFolder, { 项目一: ['oem'] })
+  assert.deepEqual(resume.targetSlugsByFolder, { 项目一: { 'order-terms': 'order-terms' } })
+})
