@@ -4,6 +4,9 @@ import { CONTENT_TYPES } from './constants.mjs'
 
 const DEFAULT_TIMEOUT_MS = 120000
 const RETRIES = 2
+const TARGET_SLUG_ALIASES = Object.freeze({
+  oem: ['oem-odm']
+})
 
 export async function findPage(project, slug, requestOptions = {}) {
   const { expectedFields = [], ...wordpressRequestOptions } = requestOptions
@@ -36,12 +39,12 @@ export async function findPage(project, slug, requestOptions = {}) {
     delete allPagesParams.slug
     let allPages
     try {
-      allPages = await wpRequest(project, '/wp-json/wp/v2/pages', {
+      allPages = await wpRequestAllPages(project, '/wp-json/wp/v2/pages', {
         ...wordpressRequestOptions,
         params: allPagesParams
       })
     } catch {
-      allPages = await wpRequest(project, '/wp-json/wp/v2/pages', {
+      allPages = await wpRequestAllPages(project, '/wp-json/wp/v2/pages', {
         ...wordpressRequestOptions,
         params: { ...allPagesParams, status: 'publish' }
       }).catch(() => [])
@@ -344,7 +347,10 @@ export async function resolvePublisherTargets(project, fields, options = {}) {
   return Object.fromEntries(fields.map((field) => {
     const collection = field.targetType === 'tag-banner' ? tagCollection : pageCollection
     const expectedSlug = String(field.pageSlug || field.key).toLowerCase()
-    const target = collection.items.find((item) => String(item?.slug || '').toLowerCase() === expectedSlug)
+    const acceptedSlugs = [expectedSlug, ...(TARGET_SLUG_ALIASES[expectedSlug] || [])]
+    const target = acceptedSlugs
+      .map((slug) => collection.items.find((item) => String(item?.slug || '').toLowerCase() === slug))
+      .find(Boolean)
     if (target) {
       return [field.key, {
         target: {
@@ -428,11 +434,11 @@ async function fetchPublisherPages(project, requestOptions) {
     _fields: 'id,title,slug,status,featured_media'
   }
   try {
-    const pages = await wpRequest(project, '/wp-json/wp/v2/pages', { ...requestOptions, params })
+    const pages = await wpRequestAllPages(project, '/wp-json/wp/v2/pages', { ...requestOptions, params })
     return { items: validTargets(pages), error: '' }
   } catch (error) {
     try {
-      const pages = await wpRequest(project, '/wp-json/wp/v2/pages', {
+      const pages = await wpRequestAllPages(project, '/wp-json/wp/v2/pages', {
         ...requestOptions,
         params: { ...params, status: 'publish' }
       })
@@ -445,14 +451,14 @@ async function fetchPublisherPages(project, requestOptions) {
 
 async function fetchProductTags(project, requestOptions) {
   try {
-    const tags = await wpRequest(project, '/wp-json/wc/v3/products/tags', {
+    const tags = await wpRequestAllPages(project, '/wp-json/wc/v3/products/tags', {
       ...requestOptions,
       params: { per_page: 100, hide_empty: false }
     })
     return { items: validTargets(tags), error: '' }
   } catch (wooError) {
     try {
-      const tags = await wpRequest(project, '/wp-json/wp/v2/product_tag', {
+      const tags = await wpRequestAllPages(project, '/wp-json/wp/v2/product_tag', {
         ...requestOptions,
         params: { per_page: 100, hide_empty: false, context: 'edit' }
       })
@@ -524,6 +530,25 @@ function pageSlugScore(page, slug) {
   return 0
 }
 
+async function wpRequestAllPages(project, pathname, options = {}) {
+  const perPage = Math.min(100, Math.max(1, Number(options.params?.per_page) || 100))
+  const first = await wpRequest(project, pathname, {
+    ...options,
+    params: { ...(options.params || {}), per_page: perPage, page: 1 },
+    includeResponseMeta: true
+  })
+  const items = Array.isArray(first.data) ? [...first.data] : []
+  const totalPages = Math.min(1000, Math.max(1, Number(first.totalPages) || 1))
+  for (let page = 2; page <= totalPages; page += 1) {
+    const batch = await wpRequest(project, pathname, {
+      ...options,
+      params: { ...(options.params || {}), per_page: perPage, page }
+    })
+    if (Array.isArray(batch)) items.push(...batch)
+  }
+  return items
+}
+
 async function wpRequest(project, pathname, options = {}) {
   const url = new URL(pathname, ensureTrailingSlash(project.url))
   for (const [key, value] of Object.entries(options.params || {})) {
@@ -559,6 +584,12 @@ async function wpRequest(project, pathname, options = {}) {
         const error = new Error(`HTTP ${response.status}: ${message}`)
         error.status = response.status
         throw error
+      }
+      if (options.includeResponseMeta) {
+        return {
+          data,
+          totalPages: Number(response.headers.get('x-wp-totalpages')) || 1
+        }
       }
       return data
     } catch (error) {
@@ -764,7 +795,7 @@ function ensureTrailingSlash(value) {
 
 function parseJson(text) {
   try {
-    return JSON.parse(text)
+    return JSON.parse(String(text).replace(/^\uFEFF/, ''))
   } catch {
     return text
   }

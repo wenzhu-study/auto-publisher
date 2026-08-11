@@ -164,6 +164,26 @@ test('records each image result and continues after one upload fails', async () 
     assert.equal(missingImageResult.status, 'completed-with-warnings')
     assert.equal(missingImageResult.imageResults['quality-control'].status, 'skipped')
     assert.match(missingImageResult.imageResults['quality-control'].reason, /素材目录没有/)
+
+    uploadedFilenames.length = 0
+    const continuedResults = await executeBatch([
+      {
+        ...projects[0],
+        folderName: '缺少写入目标的项目',
+        selected: { 'quality-control': featuredImagePath },
+        fieldsToProcess: ['quality-control']
+      },
+      {
+        ...projects[0],
+        folderName: '后续正常项目',
+        selected: { 'about-us': featuredImagePath },
+        fieldsToProcess: ['about-us']
+      }
+    ], () => {})
+    assert.equal(continuedResults.length, 2)
+    assert.equal(continuedResults[0].status, 'failed')
+    assert.equal(continuedResults[1].status, 'completed')
+    assert.deepEqual(uploadedFilenames, ['about-us-3-1-1.png'])
   } finally {
     await rm(root, { recursive: true, force: true })
     await new Promise((resolve) => server.close(resolve))

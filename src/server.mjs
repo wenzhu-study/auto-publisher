@@ -75,6 +75,8 @@ async function handleApi(request, response, url) {
         fieldSelection: true,
         projectListImport: true,
         projectListLocalUrls: true,
+        retryProblemsAfterCompletion: true,
+        publisherTargetPagination: true,
         directoryPicker: true,
         browserDirectoryPicker: true,
         imageFieldSchema: 8

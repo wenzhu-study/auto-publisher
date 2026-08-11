@@ -30,6 +30,7 @@ test('resumes unfinished projects and retries only their unsuccessful image fiel
   assert.equal(resume.seed, 'fixed-seed')
   assert.equal(resume.projectText, '项目一：https://example.test/')
   assert.equal(resume.projectListName, 'projects.txt')
+  assert.equal(resume.sourceStatus, 'cancelled')
   assert.deepEqual(resume.processedFolders, ['项目一'])
   assert.deepEqual(resume.remainingFolders, ['项目二', '项目三'])
   assert.deepEqual(resume.retryFieldsByFolder, { 项目二: ['pt_img'] })
@@ -37,14 +38,52 @@ test('resumes unfinished projects and retries only their unsuccessful image fiel
   assert.equal(resume.retryProjects, 1)
 })
 
-test('does not offer completed runs or active running checkpoints for resume', () => {
+test('offers completed runs only when image fields still need repair', () => {
   const report = {
     mode: 'upload',
     status: 'completed',
+    plan: [
+      { folderName: '项目一', processFields: ['ap_img', 'pt_img'] },
+      { folderName: '项目二', processFields: ['ap_img', 'pt_img'] }
+    ],
+    results: [
+      {
+        folderName: '项目一',
+        status: 'completed-with-warnings',
+        imageResults: {
+          ap_img: { field: 'ap_img', status: 'succeeded' },
+          pt_img: { field: 'pt_img', status: 'skipped' }
+        }
+      },
+      {
+        folderName: '项目二',
+        status: 'completed',
+        imageResults: {
+          ap_img: { field: 'ap_img', status: 'succeeded' },
+          pt_img: { field: 'pt_img', status: 'succeeded' }
+        }
+      }
+    ]
+  }
+  const repair = buildResumeState(report, 'completed.json')
+  assert.equal(repair.sourceStatus, 'completed')
+  assert.deepEqual(repair.remainingFolders, ['项目一'])
+  assert.deepEqual(repair.retryFieldsByFolder, { 项目一: ['pt_img'] })
+  assert.deepEqual(repair.processedFolders, ['项目二'])
+
+  const successful = structuredClone(report)
+  successful.results[0].status = 'completed'
+  successful.results[0].imageResults.pt_img.status = 'succeeded'
+  assert.equal(buildResumeState(successful), null)
+})
+
+test('does not offer active running checkpoints while the task is still active', () => {
+  const report = {
+    mode: 'upload',
+    status: 'running',
     plan: [{ folderName: '项目一' }],
     results: []
   }
-  assert.equal(buildResumeState(report), null)
   assert.equal(buildResumeState({ ...report, status: 'running' }, '', { allowRunning: false }), null)
   assert.deepEqual(
     buildResumeState({ ...report, status: 'running' }, '', { allowRunning: true }).remainingFolders,

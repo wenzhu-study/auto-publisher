@@ -57,6 +57,8 @@ async function boot() {
     ])
     if (!config.features?.fieldSelection || !config.features?.projectListImport ||
         !config.features?.projectListLocalUrls ||
+        !config.features?.retryProblemsAfterCompletion ||
+        !config.features?.publisherTargetPagination ||
         !config.features?.directoryPicker || !config.features?.browserDirectoryPicker ||
         config.features?.imageFieldSchema !== 8) {
       throw new Error('本地服务需要重启后才能使用最新图片分类')
@@ -436,7 +438,7 @@ function updateSelectionSummary() {
     : 0
   elements['summary-selected'].textContent = count
   elements['action-selection'].textContent = state.resume
-    ? `续跑批次：已完成 ${state.resume.processed} 个，待执行 ${count} 个，共 ${planCounts.uploads} 张图片${planCounts.missing ? `，缺图 ${planCounts.missing} 项` : ''}${selectedRepairs ? `（其中待修复 ${selectedRepairs} 个）` : ''}`
+    ? `${isRepairResume() ? '问题重跑' : '续跑批次'}：已完成 ${state.resume.processed} 个，待执行 ${count} 个，共 ${planCounts.uploads} 张图片${planCounts.missing ? `，缺图 ${planCounts.missing} 项` : ''}${selectedRepairs ? `（其中待修复 ${selectedRepairs} 个）` : ''}`
     : `已选择 ${count} 个项目，共 ${planCounts.uploads} 张图片${planCounts.missing ? `，缺图 ${planCounts.missing} 项` : ''}`
   elements['action-seed'].textContent = `随机种子：${state.seed}`
   setControls()
@@ -568,6 +570,7 @@ function applyResumeFromJob(job) {
   const remainingFolders = selectedFolders.filter((folder) => !processed.has(folder))
   state.resume = remainingFolders.length ? {
     sourceReport: job.reportPath || '',
+    sourceStatus: job.status,
     seed: job.seed,
     total: selectedFolders.length,
     processed: processedFolders.length,
@@ -603,11 +606,7 @@ function beginPolling() {
       if (isRunning()) {
         state.pollingTimer = setTimeout(poll, 800)
       } else if (wasRunning) {
-        if (state.activeJob.mode === 'upload' && state.activeJob.status === 'cancelled') {
-          applyResumeFromJob(state.activeJob)
-        } else if (state.activeJob.mode === 'upload') {
-          state.resume = null
-        }
+        if (state.activeJob.mode === 'upload') applyResumeFromJob(state.activeJob)
         renderProjects()
         await loadReports()
         toast(jobStatusLabel(state.activeJob), state.activeJob.failed ? 'error' : 'success')
@@ -894,6 +893,8 @@ function setControls() {
   elements['resume-button'].disabled = unavailable
   elements['stop-button'].hidden = !running
   elements['resume-button'].hidden = running || !state.resume
+  const resumeLabel = elements['resume-button'].querySelector('span')
+  if (resumeLabel) resumeLabel.textContent = isRepairResume() ? '重跑问题项' : '继续未完成'
   elements['upload-button'].hidden = Boolean(state.resume)
   elements['restart-batch-button'].hidden = running || !state.resume
   elements['restart-batch-button'].disabled = state.loading
@@ -909,6 +910,11 @@ function setControls() {
   for (const input of elements['field-options'].querySelectorAll('.field-checkbox')) {
     input.disabled = state.loading || running || Boolean(state.resume)
   }
+}
+
+function isRepairResume() {
+  return Boolean(state.resume?.sourceStatus &&
+    !['cancelled', 'running', 'failed'].includes(state.resume.sourceStatus))
 }
 
 function renderFieldOptions() {

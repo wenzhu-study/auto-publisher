@@ -1,7 +1,10 @@
 export function buildResumeState(report, sourceReport = '', options = {}) {
   if (!report || report.mode !== 'upload') return null
   const allowRunning = options.allowRunning !== false
-  if (report.status !== 'cancelled' && !(report.status === 'running' && allowRunning)) return null
+  const interrupted = ['cancelled', 'failed'].includes(report.status) ||
+    (report.status === 'running' && allowRunning)
+  const finished = ['completed', 'completed-with-errors', 'completed-with-warnings'].includes(report.status)
+  if (!interrupted && !finished) return null
 
   const selectedFolders = unique((report.plan || []).map((item) => item?.folderName).filter(Boolean))
   const selectedFields = unique((report.plan || [])
@@ -16,7 +19,10 @@ export function buildResumeState(report, sourceReport = '', options = {}) {
   const processedFolders = []
   for (const folder of selectedFolders) {
     const result = resultByFolder.get(folder)
-    if (!result) continue
+    if (!result) {
+      if (finished) processedFolders.push(folder)
+      continue
+    }
     const retryFields = getRetryFields(result)
     if (retryFields === null) continue
     if (retryFields.length) retryFieldsByFolder[folder] = retryFields
@@ -28,6 +34,7 @@ export function buildResumeState(report, sourceReport = '', options = {}) {
 
   return {
     sourceReport,
+    sourceStatus: report.status,
     seed: report.seed || '',
     projectText: report.projectText || '',
     projectListName: report.projectListName || '',

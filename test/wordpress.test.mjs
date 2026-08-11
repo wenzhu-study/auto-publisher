@@ -129,6 +129,56 @@ test('resolves new 3:1 fields to product tags and same-slug pages', async () => 
   }
 })
 
+test('reads every target page and accepts oem-odm as an oem fallback', async () => {
+  const pageRequests = []
+  const tagRequests = []
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost')
+    const page = Number(url.searchParams.get('page') || 1)
+    if (url.pathname === '/wp-json/wp/v2/pages') {
+      pageRequests.push(page)
+      response.writeHead(200, {
+        'Content-Type': 'application/json',
+        'X-WP-TotalPages': '2'
+      })
+      const pages = page === 1
+        ? [{ id: 21, slug: 'home', featured_media: 0 }]
+        : [{ id: 27, slug: 'oem-odm', featured_media: 0 }]
+      response.end(`${page === 2 ? '\uFEFF' : ''}${JSON.stringify(pages)}`)
+      return
+    }
+    if (url.pathname === '/wp-json/wc/v3/products/tags') {
+      tagRequests.push(page)
+      return json(response, 200, page === 1
+        ? [{ id: 41, slug: 'hot-products', name: 'Hot Products' }]
+        : [{ id: 42, slug: 'new-products', name: 'New Products' }], {
+        'X-WP-TotalPages': '2'
+      })
+    }
+    return json(response, 404, { message: 'not found' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const project = {
+    url: `http://127.0.0.1:${server.address().port}`,
+    username: 'shop',
+    appPassword: 'application-password'
+  }
+
+  try {
+    const found = await resolvePublisherTargets(project, [
+      { key: 'new-products', targetType: 'tag-banner' },
+      { key: 'oem', pageSlug: 'oem', targetType: 'page-featured' }
+    ])
+    assert.deepEqual(pageRequests, [1, 2])
+    assert.deepEqual(tagRequests, [1, 2])
+    assert.equal(found['new-products'].target.id, 42)
+    assert.equal(found.oem.target.id, 27)
+    assert.equal(found.oem.target.slug, 'oem-odm')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('writes and verifies page featured images and product tag category banners', async () => {
   let featuredMedia = 0
   let categoryBanner = 0
@@ -284,8 +334,8 @@ test('falls back to XML-RPC with existing custom-field IDs when REST ignores ACF
   }
 })
 
-function json(response, status, value) {
-  response.writeHead(status, { 'Content-Type': 'application/json' })
+function json(response, status, value, headers = {}) {
+  response.writeHead(status, { 'Content-Type': 'application/json', ...headers })
   response.end(JSON.stringify(value))
 }
 
