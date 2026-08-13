@@ -1346,7 +1346,8 @@ dialog::backdrop {
   border-bottom: 1px solid var(--line);
 }
 
-.report-detail-summary span {
+.report-detail-summary > span,
+.report-summary-filter {
   min-height: 54px;
   display: flex;
   align-items: baseline;
@@ -1358,6 +1359,26 @@ dialog::backdrop {
   font-size: 10px;
 }
 
+.report-summary-filter {
+  width: 100%;
+  border: 0;
+  border-bottom: 3px solid transparent;
+}
+
+.report-summary-filter:hover {
+  background: #eef3f7;
+}
+
+.report-summary-filter.active {
+  background: #edf5fb;
+  border-bottom-color: var(--blue);
+}
+
+.report-summary-filter:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -3px;
+}
+
 .report-detail-summary b {
   color: var(--green);
   font-size: 17px;
@@ -1365,6 +1386,30 @@ dialog::backdrop {
 
 .report-detail-summary .summary-error b {
   color: var(--red);
+}
+
+.report-summary-filter span {
+  color: var(--muted);
+}
+
+.report-filter-head {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 0 4px;
+}
+
+.report-filter-head strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.report-filter-head span {
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .report-detail-body {
@@ -1385,6 +1430,10 @@ dialog::backdrop {
 
 .report-project.has-error {
   border-left-color: var(--red);
+}
+
+.report-project.not-run {
+  border-left-color: #aab3ba;
 }
 
 .report-project > header {
@@ -1802,7 +1851,7 @@ dialog::backdrop {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .report-detail-summary span:last-child {
+  .report-detail-summary > :last-child {
     grid-column: 1 / -1;
   }
 

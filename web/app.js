@@ -20,6 +20,8 @@ const state = {
   resume: null,
   issueReport: null,
   issueReportName: '',
+  reportDetail: null,
+  reportDetailFilter: 'all',
   pollingTimer: 0,
   loading: false,
   selectingDirectory: false,
@@ -130,6 +132,7 @@ function bindEvents() {
   elements['reports-tab'].addEventListener('click', () => switchPanel('reports'))
   elements['issue-callout'].addEventListener('click', () => switchPanel('issues'))
   elements['report-list'].addEventListener('click', onReportClick)
+  elements['report-detail-summary'].addEventListener('click', onReportSummaryClick)
   elements['check-button'].addEventListener('click', () => startJob('check'))
   elements['upload-button'].addEventListener('click', openUploadDialog)
   elements['resume-button'].addEventListener('click', openUploadDialog)
@@ -767,21 +770,11 @@ async function openReportIssues(name) {
 async function openReport(name) {
   try {
     const result = await api(`/api/reports/${encodeURIComponent(name)}`)
-    const report = result.report
+    state.reportDetail = result.report
+    state.reportDetailFilter = 'all'
     elements['report-detail-title'].textContent = name
-    elements['report-detail-meta'].textContent = `${report.mode === 'upload' ? '正式上传' : '站点检查'} · ${formatDateTime(report.startedAt)}`
-    const imageResults = (report.results || []).flatMap((project) => Object.values(project.imageResults || {}))
-    const succeeded = report.succeeded ?? (report.results || []).filter((project) =>
-      ['completed', 'completed-with-warnings'].includes(project.status) || project.ok === true).length
-    elements['report-detail-summary'].innerHTML = `
-      <span><b>${report.totalProjects || 0}</b> 项目</span>
-      <span><b>${succeeded}</b> 项目成功</span>
-      <span class="summary-error"><b>${report.failed || 0}</b> 项目失败</span>
-      <span><b>${report.imageSucceeded ?? imageResults.filter((image) => image.status === 'succeeded').length}</b> 图片成功</span>
-      <span class="summary-error"><b>${report.imageFailed ?? imageResults.filter((image) => ['upload-failed', 'write-failed'].includes(image.status)).length}</b> 图片失败</span>
-    `
-    elements['report-detail-body'].innerHTML = sortProjectsByProblems(report.results || []).map(renderReportProject).join('') ||
-      '<div class="event-placeholder"><span>报告中没有项目明细</span></div>'
+    elements['report-detail-meta'].textContent = `${state.reportDetail.mode === 'upload' ? '正式上传' : '站点检查'} · ${formatDateTime(state.reportDetail.startedAt)}`
+    renderReportDetail()
     elements['report-dialog'].showModal()
     refreshIcons()
   } catch (error) {
@@ -789,11 +782,87 @@ async function openReport(name) {
   }
 }
 
+function onReportSummaryClick(event) {
+  const button = event.target.closest('[data-report-filter]')
+  if (!button || !state.reportDetail) return
+  state.reportDetailFilter = button.dataset.reportFilter
+  renderReportDetail()
+}
+
+function renderReportDetail() {
+  const report = state.reportDetail
+  if (!report) return
+  const projects = reportDetailProjects(report)
+  const successful = projects.filter(isSuccessfulReportProject)
+  const failed = projects.filter(isFailedReportProject)
+  const imageResults = projects.flatMap((project) => Object.values(project.imageResults || {}))
+  const filters = {
+    all: { label: '全部项目', projects },
+    success: { label: '成功项目', projects: successful },
+    failed: { label: '失败项目', projects: failed }
+  }
+  const current = filters[state.reportDetailFilter] || filters.all
+  elements['report-detail-summary'].innerHTML = `
+    ${reportSummaryButton('all', projects.length, '项目')}
+    ${reportSummaryButton('success', successful.length, '项目成功')}
+    ${reportSummaryButton('failed', failed.length, '项目失败', true)}
+    <span class="report-summary-stat"><b>${report.imageSucceeded ?? imageResults.filter((image) => image.status === 'succeeded').length}</b> 图片成功</span>
+    <span class="report-summary-stat summary-error"><b>${report.imageFailed ?? imageResults.filter((image) => ['upload-failed', 'write-failed'].includes(image.status)).length}</b> 图片失败</span>
+  `
+  elements['report-detail-body'].innerHTML = `
+    <div class="report-filter-head">
+      <strong>${current.label}</strong>
+      <span>${current.projects.length} 个项目</span>
+    </div>
+    ${current.projects.map(renderReportProject).join('') ||
+      `<div class="event-placeholder"><span>没有${current.label}</span></div>`}
+  `
+}
+
+function reportSummaryButton(filter, count, label, error = false) {
+  const active = state.reportDetailFilter === filter
+  return `
+    <button class="report-summary-filter ${error ? 'summary-error' : ''} ${active ? 'active' : ''}"
+      type="button" data-report-filter="${filter}" aria-pressed="${active}">
+      <b>${count}</b><span>${label}</span>
+    </button>
+  `
+}
+
+function reportDetailProjects(report) {
+  const results = Array.isArray(report.results) ? report.results.filter(Boolean) : []
+  const byFolder = new Map(results.filter((project) => project.folderName).map((project) => [project.folderName, project]))
+  const planned = (report.plan || []).filter((project) => project?.folderName).map((project) =>
+    byFolder.get(project.folderName) || {
+      folderName: project.folderName,
+      projectName: project.projectName || project.folderName,
+      siteUrl: project.siteUrl || '',
+      status: 'not-processed',
+      error: '该项目尚未执行'
+    })
+  const plannedFolders = new Set(planned.map((project) => project.folderName))
+  return planned.length
+    ? [...planned, ...results.filter((project) => !plannedFolders.has(project.folderName))]
+    : results
+}
+
+function isFailedReportProject(project) {
+  if (project.ok === false || ['failed', 'check-failed'].includes(project.status)) return true
+  return Object.values(project.imageResults || {})
+    .some((image) => ['upload-failed', 'write-failed'].includes(image.status))
+}
+
+function isSuccessfulReportProject(project) {
+  if (isFailedReportProject(project)) return false
+  return project.ok === true || ['completed', 'completed-with-warnings', 'checked', 'checked-with-warnings'].includes(project.status)
+}
+
 function renderReportProject(project) {
   const images = Object.values(project.imageResults || {})
-  const failed = project.status === 'failed' || project.ok === false
+  const failed = isFailedReportProject(project)
+  const successful = isSuccessfulReportProject(project)
   const warning = project.status === 'completed-with-warnings' || Boolean(project.warnings?.length)
-  const status = failed ? '失败' : warning ? '完成，有警告' : '成功'
+  const status = failed ? '失败' : successful ? warning ? '成功，有跳过' : '成功' : '未执行'
   const imageRows = images.length ? images.map((image) => `
     <div class="report-image-row">
       <div class="report-image-name">
@@ -806,10 +875,10 @@ function renderReportProject(project) {
     </div>
   `).join('') : `<p class="report-project-note">${escapeHtml(project.error || project.warnings?.join('；') || '旧报告没有逐图记录')}</p>`
   return `
-    <section class="report-project ${failed ? 'has-error' : ''}">
+    <section class="report-project ${failed ? 'has-error' : successful ? '' : 'not-run'}">
       <header>
         <div><strong>${escapeHtml(project.projectName || project.folderName)}</strong><span>${escapeHtml(project.siteUrl || '')}</span></div>
-        <span class="status-tag ${failed ? 'invalid' : 'valid'}">${status}</span>
+        <span class="status-tag ${failed ? 'invalid' : successful ? 'valid' : 'excluded'}">${status}</span>
       </header>
       ${project.error ? `<p class="report-project-error">${escapeHtml(project.error)}</p>` : ''}
       ${imageRows}
