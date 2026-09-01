@@ -22,10 +22,12 @@ export async function findPage(project, slug, requestOptions = {}) {
   try {
     pages = await wpRequest(project, '/wp-json/wp/v2/pages', { ...wordpressRequestOptions, params })
   } catch (error) {
+    rethrowCancellation(error, wordpressRequestOptions.signal)
     pages = await wpRequest(project, '/wp-json/wp/v2/pages', {
       ...wordpressRequestOptions,
       params: { ...params, status: 'publish' }
-    }).catch(() => {
+    }).catch((fallbackError) => {
+      rethrowCancellation(fallbackError, wordpressRequestOptions.signal)
       throw error
     })
   }
@@ -43,11 +45,15 @@ export async function findPage(project, slug, requestOptions = {}) {
         ...wordpressRequestOptions,
         params: allPagesParams
       })
-    } catch {
+    } catch (error) {
+      rethrowCancellation(error, wordpressRequestOptions.signal)
       allPages = await wpRequestAllPages(project, '/wp-json/wp/v2/pages', {
         ...wordpressRequestOptions,
         params: { ...allPagesParams, status: 'publish' }
-      }).catch(() => [])
+      }).catch((fallbackError) => {
+        rethrowCancellation(fallbackError, wordpressRequestOptions.signal)
+        return []
+      })
     }
 
     const candidates = Array.isArray(allPages)
@@ -64,7 +70,7 @@ export async function findPage(project, slug, requestOptions = {}) {
   return page
 }
 
-export async function uploadMedia(project, filePath, label) {
+export async function uploadMedia(project, filePath, label, options = {}) {
   const body = await readFile(filePath)
   const extension = path.extname(filePath).toLowerCase()
   const contentType = CONTENT_TYPES[extension]
@@ -72,6 +78,7 @@ export async function uploadMedia(project, filePath, label) {
 
   const filename = sanitizeFilename(path.basename(filePath))
   const media = await wpRequest(project, '/wp-json/wp/v2/media', {
+    ...options,
     method: 'POST',
     body,
     headers: {
@@ -83,10 +90,12 @@ export async function uploadMedia(project, filePath, label) {
 
   try {
     await wpRequest(project, `/wp-json/wp/v2/media/${media.id}`, {
+      ...options,
       method: 'POST',
       json: { title: `${label} website content image`, alt_text: label }
     })
-  } catch {
+  } catch (error) {
+    rethrowCancellation(error, options.signal)
     // Title and alt text are non-critical; the media ID is enough to update ACF.
   }
 
@@ -97,7 +106,7 @@ export async function uploadMedia(project, filePath, label) {
   }
 }
 
-export async function updateAndVerifyImageFields(project, pageId, expected) {
+export async function updateAndVerifyImageFields(project, pageId, expected, options = {}) {
   const payload = Object.fromEntries(
     Object.entries(expected).map(([fieldName, value]) => [
       fieldName,
@@ -108,17 +117,19 @@ export async function updateAndVerifyImageFields(project, pageId, expected) {
     {
       name: 'WordPress 页面 REST ACF',
       request: () => wpRequest(project, `/wp-json/wp/v2/pages/${pageId}`, {
+        ...options,
         method: 'POST',
         json: { acf: payload }
       })
     },
     {
       name: 'XML-RPC custom_fields',
-      request: () => updateXmlRpcImageFields(project, pageId, payload)
+      request: () => updateXmlRpcImageFields(project, pageId, payload, options)
     },
     {
       name: 'WordPress 页面 REST fields',
       request: () => wpRequest(project, `/wp-json/wp/v2/pages/${pageId}`, {
+        ...options,
         method: 'POST',
         json: { fields: payload }
       })
@@ -126,6 +137,7 @@ export async function updateAndVerifyImageFields(project, pageId, expected) {
     {
       name: 'ACF REST pages',
       request: () => wpRequest(project, `/wp-json/acf/v3/pages/${pageId}`, {
+        ...options,
         method: 'POST',
         json: { fields: payload }
       })
@@ -133,6 +145,7 @@ export async function updateAndVerifyImageFields(project, pageId, expected) {
     {
       name: 'ACF REST page',
       request: () => wpRequest(project, `/wp-json/acf/v3/page/${pageId}`, {
+        ...options,
         method: 'POST',
         json: { fields: payload }
       })
@@ -140,6 +153,7 @@ export async function updateAndVerifyImageFields(project, pageId, expected) {
     {
       name: 'ACF REST posts',
       request: () => wpRequest(project, `/wp-json/acf/v3/posts/${pageId}`, {
+        ...options,
         method: 'POST',
         json: { fields: payload }
       })
@@ -150,10 +164,11 @@ export async function updateAndVerifyImageFields(project, pageId, expected) {
   for (const attempt of attempts) {
     try {
       await attempt.request()
-      const verification = await verifyImageFields(project, pageId, payload)
+      const verification = await verifyImageFields(project, pageId, payload, options)
       if (verification.ok) return { method: attempt.name, actual: verification.actual }
       errors.push(`${attempt.name}: 写入响应成功但回读不一致（${verification.details}）`)
     } catch (error) {
+      rethrowCancellation(error, options.signal)
       errors.push(`${attempt.name}: ${error.message}`)
     }
   }
@@ -161,16 +176,18 @@ export async function updateAndVerifyImageFields(project, pageId, expected) {
   throw new Error(`页面 ID ${pageId} 图片字段写入失败：${errors.join('；')}`)
 }
 
-export async function verifyImageFields(project, pageId, expected) {
+export async function verifyImageFields(project, pageId, expected, options = {}) {
   const sources = []
   try {
     const page = await wpRequest(project, `/wp-json/wp/v2/pages/${pageId}`, {
+      ...options,
       params: { context: 'edit', acf_format: 'standard', _fields: 'acf,fields,meta' }
     })
     sources.push(page?.acf, page?.fields, page?.meta)
-    const verification = await compareImageFieldSources(project, sources, expected)
+    const verification = await compareImageFieldSources(project, sources, expected, options)
     if (verification.ok) return verification
-  } catch {
+  } catch (error) {
+    rethrowCancellation(error, options.signal)
     // ACF endpoints below may still expose the values.
   }
 
@@ -180,26 +197,28 @@ export async function verifyImageFields(project, pageId, expected) {
     `/wp-json/acf/v3/posts/${pageId}`
   ]) {
     try {
-      const value = await wpRequest(project, endpoint)
+      const value = await wpRequest(project, endpoint, options)
       sources.push(value?.acf, value?.fields, value)
-      const verification = await compareImageFieldSources(project, sources, expected)
+      const verification = await compareImageFieldSources(project, sources, expected, options)
       if (verification.ok) return verification
-    } catch {
+    } catch (error) {
+      rethrowCancellation(error, options.signal)
       // This WordPress installation may not expose this ACF route.
     }
   }
 
   try {
-    const customFields = await fetchXmlRpcCustomFields(project, pageId)
+    const customFields = await fetchXmlRpcCustomFields(project, pageId, options)
     sources.push(Object.fromEntries(customFields.map((field) => [field.key, field.value])))
-  } catch {
+  } catch (error) {
+    rethrowCancellation(error, options.signal)
     // XML-RPC may be disabled when a REST route already exposes the fields.
   }
 
-  return compareImageFieldSources(project, sources, expected)
+  return compareImageFieldSources(project, sources, expected, options)
 }
 
-async function compareImageFieldSources(project, sources, expected) {
+async function compareImageFieldSources(project, sources, expected, options = {}) {
   const actual = {}
   const mismatches = []
   const mediaUrlCache = new Map()
@@ -213,7 +232,7 @@ async function compareImageFieldSources(project, sources, expected) {
     }
   }
   await Promise.all([...mediaIdsToFetch].map(async (id) => {
-    mediaUrlCache.set(id, await fetchMediaUrl(project, id))
+    mediaUrlCache.set(id, await fetchMediaUrl(project, id, options))
   }))
 
   for (const [fieldName, expectedValue] of Object.entries(expected)) {
@@ -268,19 +287,19 @@ export function extractMediaUrls(value) {
   return []
 }
 
-export async function fetchXmlRpcCustomFields(project, pageId) {
+export async function fetchXmlRpcCustomFields(project, pageId, options = {}) {
   const response = await xmlRpcRequest(project, 'wp.getPost', [
     0,
     project.username,
     project.appPassword,
     Number(pageId),
     ['custom_fields', 'post']
-  ])
+  ], options)
   return Array.isArray(response?.custom_fields) ? response.custom_fields : []
 }
 
-export async function updateXmlRpcImageFields(project, pageId, expected) {
-  const currentFields = await fetchXmlRpcCustomFields(project, pageId)
+export async function updateXmlRpcImageFields(project, pageId, expected, options = {}) {
+  const currentFields = await fetchXmlRpcCustomFields(project, pageId, options)
   const byKey = new Map(currentFields.filter((field) => field?.key).map((field) => [field.key, field]))
   const customFields = Object.entries(expected).map(([key, value]) => {
     const current = byKey.get(key)
@@ -300,7 +319,7 @@ export async function updateXmlRpcImageFields(project, pageId, expected) {
     project.appPassword,
     Number(pageId),
     { custom_fields: customFields }
-  ])
+  ], options)
   if (response !== true && response !== 1 && response !== '1') {
     throw new Error('XML-RPC wp.editPost 未返回成功')
   }
@@ -315,7 +334,8 @@ export async function preflightSite(project, options = {}) {
   const needsPriceList = fields.includes('pt_img')
   const requestOptions = {
     timeoutMs: options.timeoutMs || 20000,
-    retries: options.retries ?? 0
+    retries: options.retries ?? 0,
+    signal: options.signal
   }
   const [aboutPage, priceListPage] = await Promise.all([
     aboutFields.length
@@ -337,7 +357,8 @@ export async function resolvePublisherTargets(project, fields, options = {}) {
   const tagFields = fields.filter((field) => field.targetType === 'tag-banner')
   const requestOptions = {
     timeoutMs: options.timeoutMs || 20000,
-    retries: options.retries ?? 0
+    retries: options.retries ?? 0,
+    signal: options.signal
   }
   const [pageCollection, tagCollection] = await Promise.all([
     pageFields.length ? fetchPublisherPages(project, requestOptions) : Promise.resolve({ items: [], error: '' }),
@@ -368,13 +389,15 @@ export async function resolvePublisherTargets(project, fields, options = {}) {
   }))
 }
 
-export async function updateAndVerifyPageFeaturedImage(project, pageId, mediaId) {
+export async function updateAndVerifyPageFeaturedImage(project, pageId, mediaId, options = {}) {
   const expectedId = Number(mediaId)
   await wpRequest(project, `/wp-json/wp/v2/pages/${Number(pageId)}`, {
+    ...options,
     method: 'POST',
     json: { featured_media: expectedId }
   })
   const page = await wpRequest(project, `/wp-json/wp/v2/pages/${Number(pageId)}`, {
+    ...options,
     params: { context: 'edit', _fields: 'id,slug,featured_media' }
   })
   const actualId = Number(page?.featured_media)
@@ -384,12 +407,13 @@ export async function updateAndVerifyPageFeaturedImage(project, pageId, mediaId)
   return { method: 'WordPress 页面特色图片', actual: { featured_media: actualId } }
 }
 
-export async function updateAndVerifyTagBanner(project, tagId, mediaId) {
+export async function updateAndVerifyTagBanner(project, tagId, mediaId, options = {}) {
   const expectedId = Number(mediaId)
   const attempts = [
     {
       name: 'WordPress 产品标签 REST ACF',
       request: () => wpRequest(project, `/wp-json/wp/v2/product_tag/${Number(tagId)}`, {
+        ...options,
         method: 'POST',
         json: { acf: { category_banner: expectedId } }
       })
@@ -397,6 +421,7 @@ export async function updateAndVerifyTagBanner(project, tagId, mediaId) {
     {
       name: 'ACF REST product_tag',
       request: () => wpRequest(project, `/wp-json/acf/v3/product_tag/${Number(tagId)}`, {
+        ...options,
         method: 'POST',
         json: { fields: { category_banner: expectedId } }
       })
@@ -404,6 +429,7 @@ export async function updateAndVerifyTagBanner(project, tagId, mediaId) {
     {
       name: 'WooCommerce 产品标签 meta_data',
       request: () => wpRequest(project, `/wp-json/wc/v3/products/tags/${Number(tagId)}`, {
+        ...options,
         method: 'PUT',
         json: { meta_data: [{ key: 'category_banner', value: expectedId }] }
       })
@@ -414,12 +440,13 @@ export async function updateAndVerifyTagBanner(project, tagId, mediaId) {
   for (const attempt of attempts) {
     try {
       const response = await attempt.request()
-      const actualId = await readTagBannerMediaId(project, tagId, response)
+      const actualId = await readTagBannerMediaId(project, tagId, response, options)
       if (actualId === expectedId) {
         return { method: attempt.name, actual: { category_banner: actualId } }
       }
       errors.push(`${attempt.name}: 写入响应成功但回读不一致（实际 ${actualId || '未读到'}）`)
     } catch (error) {
+      rethrowCancellation(error, options.signal)
       errors.push(`${attempt.name}: ${error.message}`)
     }
   }
@@ -437,6 +464,7 @@ async function fetchPublisherPages(project, requestOptions) {
     const pages = await wpRequestAllPages(project, '/wp-json/wp/v2/pages', { ...requestOptions, params })
     return { items: validTargets(pages), error: '' }
   } catch (error) {
+    rethrowCancellation(error, requestOptions.signal)
     try {
       const pages = await wpRequestAllPages(project, '/wp-json/wp/v2/pages', {
         ...requestOptions,
@@ -444,6 +472,7 @@ async function fetchPublisherPages(project, requestOptions) {
       })
       return { items: validTargets(pages), error: '' }
     } catch (fallbackError) {
+      rethrowCancellation(fallbackError, requestOptions.signal)
       return { items: [], error: fallbackError.message || error.message }
     }
   }
@@ -457,6 +486,7 @@ async function fetchProductTags(project, requestOptions) {
     })
     return { items: validTargets(tags), error: '' }
   } catch (wooError) {
+    rethrowCancellation(wooError, requestOptions.signal)
     try {
       const tags = await wpRequestAllPages(project, '/wp-json/wp/v2/product_tag', {
         ...requestOptions,
@@ -464,12 +494,13 @@ async function fetchProductTags(project, requestOptions) {
       })
       return { items: validTargets(tags), error: '' }
     } catch (wpError) {
+      rethrowCancellation(wpError, requestOptions.signal)
       return { items: [], error: wpError.message || wooError.message }
     }
   }
 }
 
-async function readTagBannerMediaId(project, tagId, initialResponse) {
+async function readTagBannerMediaId(project, tagId, initialResponse, options = {}) {
   const sources = [initialResponse]
   for (const endpoint of [
     `/wp-json/wp/v2/product_tag/${Number(tagId)}`,
@@ -478,9 +509,11 @@ async function readTagBannerMediaId(project, tagId, initialResponse) {
   ]) {
     try {
       sources.push(await wpRequest(project, endpoint, {
+        ...options,
         params: endpoint.includes('/wp/v2/') ? { context: 'edit' } : undefined
       }))
-    } catch {
+    } catch (error) {
+      rethrowCancellation(error, options.signal)
       // Installations expose different combinations of tag and ACF routes.
     }
   }
@@ -531,6 +564,7 @@ function pageSlugScore(page, slug) {
 }
 
 async function wpRequestAllPages(project, pathname, options = {}) {
+  options.signal?.throwIfAborted()
   const perPage = Math.min(100, Math.max(1, Number(options.params?.per_page) || 100))
   const first = await wpRequest(project, pathname, {
     ...options,
@@ -540,6 +574,7 @@ async function wpRequestAllPages(project, pathname, options = {}) {
   const items = Array.isArray(first.data) ? [...first.data] : []
   const totalPages = Math.min(1000, Math.max(1, Number(first.totalPages) || 1))
   for (let page = 2; page <= totalPages; page += 1) {
+    options.signal?.throwIfAborted()
     const batch = await wpRequest(project, pathname, {
       ...options,
       params: { ...(options.params || {}), per_page: perPage, page }
@@ -571,11 +606,12 @@ async function wpRequest(project, pathname, options = {}) {
   const retries = options.retries ?? RETRIES
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
+      options.signal?.throwIfAborted()
       const response = await fetch(url, {
         method: options.method || 'GET',
         headers,
         body,
-        signal: AbortSignal.timeout(options.timeoutMs || DEFAULT_TIMEOUT_MS)
+        signal: requestSignal(options.signal, options.timeoutMs || DEFAULT_TIMEOUT_MS)
       })
       const text = await response.text()
       const data = text ? parseJson(text) : null
@@ -595,14 +631,15 @@ async function wpRequest(project, pathname, options = {}) {
     } catch (error) {
       lastError = normalizeFetchError(error, options.timeoutMs || DEFAULT_TIMEOUT_MS)
       if (attempt >= retries || !isRetryable(error)) break
-      await delay(800 * (attempt + 1))
+      await delay(800 * (attempt + 1), options.signal)
     }
   }
   throw lastError
 }
 
-async function xmlRpcRequest(project, methodName, params) {
+async function xmlRpcRequest(project, methodName, params, options = {}) {
   const response = await wpRequest(project, '/xmlrpc.php', {
+    ...options,
     method: 'POST',
     body: buildXmlRpcRequest(methodName, params),
     timeoutMs: 60000,
@@ -747,13 +784,15 @@ function sameIds(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
-async function fetchMediaUrl(project, mediaId) {
+async function fetchMediaUrl(project, mediaId, options = {}) {
   try {
     const media = await wpRequest(project, `/wp-json/wp/v2/media/${Number(mediaId)}`, {
+      ...options,
       params: { context: 'edit', _fields: 'id,source_url,guid' }
     })
     return extractMediaUrls(media)[0] || ''
-  } catch {
+  } catch (error) {
+    rethrowCancellation(error, options.signal)
     return ''
   }
 }
@@ -803,13 +842,30 @@ function parseJson(text) {
 
 function normalizeFetchError(error, timeoutMs) {
   if (error?.name === 'TimeoutError') return new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒）`)
+  if (error?.name === 'AbortError') return error
   return error instanceof Error ? error : new Error(String(error))
 }
 
+function rethrowCancellation(error, signal) {
+  if (signal?.aborted || error?.name === 'AbortError') throw error
+}
+
 function isRetryable(error) {
+  if (error?.name === 'AbortError') return false
   return error?.name === 'TimeoutError' || error?.status === 429 || Number(error?.status) >= 500 || !error?.status
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+function delay(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, milliseconds)
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer)
+      reject(signal.reason)
+    }, { once: true })
+  })
+}
+
+function requestSignal(signal, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs)
+  return signal ? AbortSignal.any([signal, timeout]) : timeout
 }

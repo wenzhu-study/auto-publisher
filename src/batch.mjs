@@ -11,7 +11,7 @@ import {
   uploadMedia
 } from './wordpress.mjs'
 
-export async function checkSites(projects, onProgress = () => {}, concurrency = 5, shouldContinue = () => true) {
+export async function checkSites(projects, onProgress = () => {}, concurrency = 5, shouldContinue = () => true, options = {}) {
   const results = new Array(projects.length)
   let nextIndex = 0
 
@@ -21,6 +21,7 @@ export async function checkSites(projects, onProgress = () => {}, concurrency = 
       const item = projects[index]
       onProgress({ index, total: projects.length, item, stage: 'checking' })
       try {
+        ensureRunning(shouldContinue, options.signal)
         const targetFields = IMAGE_FIELDS.filter((field) =>
           !Array.isArray(item.fieldsToProcess) || item.fieldsToProcess.includes(field.key))
         if (!targetFields.length) throw new Error('当前项目没有需要检查的图片字段')
@@ -28,10 +29,10 @@ export async function checkSites(projects, onProgress = () => {}, concurrency = 
         const publisherFields = targetFields.filter((field) => field.targetType)
         const [fixedPages, publisherTargets] = await Promise.all([
           fixedFields.length
-            ? preflightSite(item.project, { fields: fixedFields.map((field) => field.key) })
+            ? preflightSite(item.project, { fields: fixedFields.map((field) => field.key), signal: options.signal })
             : Promise.resolve({ aboutPageId: null, priceListPageId: null, missingFields: [] }),
           publisherFields.length
-            ? resolvePublisherTargets(item.project, publisherFields)
+            ? resolvePublisherTargets(item.project, publisherFields, { signal: options.signal })
             : Promise.resolve({})
         ])
         const targetIssues = Object.fromEntries(Object.entries(publisherTargets)
@@ -68,6 +69,7 @@ export async function checkSites(projects, onProgress = () => {}, concurrency = 
           result: results[index]
         })
       } catch (error) {
+        if (isCancellation(error, shouldContinue, options.signal)) return
         results[index] = {
           folderName: item.folderName,
           projectName: item.project.name,
@@ -83,7 +85,7 @@ export async function checkSites(projects, onProgress = () => {}, concurrency = 
   return results.filter(Boolean)
 }
 
-export async function executeBatch(projects, onProgress = () => {}, shouldContinue = () => true) {
+export async function executeBatch(projects, onProgress = () => {}, shouldContinue = () => true, options = {}) {
   const results = []
   for (let index = 0; index < projects.length; index += 1) {
     if (!shouldContinue()) break
@@ -108,6 +110,7 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
     onProgress({ index, total: projects.length, item, result, stage: 'starting' })
 
     try {
+      ensureRunning(shouldContinue, options.signal)
       if (!targetFields.length) throw new Error('当前项目没有需要处理的图片字段')
       const missingAssetFields = targetFields.filter((field) => !item.selected?.[field.key])
       if (missingAssetFields.length) {
@@ -148,13 +151,13 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
         .map((field) => field.key)
       const [aboutPage, priceListPage, publisherTargets] = await Promise.all([
         needsAboutPage
-          ? findPage(item.project, 'about-us', { expectedFields: aboutFieldKeys })
+          ? findPage(item.project, 'about-us', { expectedFields: aboutFieldKeys, signal: options.signal })
           : Promise.resolve(null),
         needsPriceListPage
-          ? findPage(item.project, 'price-list', { expectedFields: ['pt_img'] })
+          ? findPage(item.project, 'price-list', { expectedFields: ['pt_img'], signal: options.signal })
           : Promise.resolve(null),
         publisherFields.length
-          ? resolvePublisherTargets(item.project, publisherFields)
+          ? resolvePublisherTargets(item.project, publisherFields, { signal: options.signal })
           : Promise.resolve({})
       ])
       result.pages = {
@@ -211,6 +214,7 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
       }))
 
       for (const field of availableFields) {
+        ensureRunning(shouldContinue, options.signal)
         const imageResult = result.imageResults[field.key]
         const target = targetByField[field.key]
         imageResult.targetId = target.id
@@ -234,7 +238,8 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
           result.uploads[field.key] = await uploadMedia(
             item.project,
             item.selected[field.key],
-            field.label
+            field.label,
+            { signal: options.signal }
           )
           const upload = result.uploads[field.key]
           imageResult.mediaId = upload.id
@@ -251,6 +256,7 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
             message: `${imageResult.filename} 上传成功，媒体 ID ${upload.id}`
           })
         } catch (error) {
+          if (isCancellation(error, shouldContinue, options.signal)) throw error
           imageResult.status = 'upload-failed'
           imageResult.error = error.message
           imageResult.finishedAt = new Date().toISOString()
@@ -271,6 +277,7 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
           ? '产品标签 category_banner'
           : field.targetType === 'page-featured' ? '页面特色图片' : `字段 ${field.key}`
         imageResult.status = 'writing'
+        ensureRunning(shouldContinue, options.signal)
         onProgress({
           index,
           total: projects.length,
@@ -283,15 +290,20 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
         })
         try {
           if (field.targetType === 'tag-banner') {
-            result.writes[field.key] = await updateAndVerifyTagBanner(item.project, target.id, imageResult.mediaId)
+            result.writes[field.key] = await updateAndVerifyTagBanner(
+              item.project, target.id, imageResult.mediaId, { signal: options.signal }
+            )
           } else if (field.targetType === 'page-featured') {
-            result.writes[field.key] = await updateAndVerifyPageFeaturedImage(item.project, target.id, imageResult.mediaId)
+            result.writes[field.key] = await updateAndVerifyPageFeaturedImage(
+              item.project, target.id, imageResult.mediaId, { signal: options.signal }
+            )
           } else {
             const fieldValue = field.gallery ? [imageResult.mediaId] : imageResult.mediaId
             result.writes[field.key] = await updateAndVerifyImageFields(
               item.project,
               target.id,
-              { [field.key]: fieldValue }
+              { [field.key]: fieldValue },
+              { signal: options.signal }
             )
           }
           imageResult.status = 'succeeded'
@@ -308,6 +320,7 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
             message: `${imageResult.filename} 已上传并写入${targetLabel}，媒体 ID ${imageResult.mediaId}`
           })
         } catch (error) {
+          if (isCancellation(error, shouldContinue, options.signal)) throw error
           imageResult.status = 'write-failed'
           imageResult.error = error.message
           imageResult.finishedAt = new Date().toISOString()
@@ -334,9 +347,10 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
           : 'completed'
       }
     } catch (error) {
-      result.status = 'failed'
-      result.error = error.message
-      markUnprocessedImages(result.imageResults, error.message)
+      const cancelled = isCancellation(error, shouldContinue, options.signal)
+      result.status = cancelled ? 'cancelled' : 'failed'
+      result.error = cancelled ? '用户停止任务' : error.message
+      markUnprocessedImages(result.imageResults, cancelled ? '任务已停止' : error.message)
       result.summary = summarizeImageResults(result.imageResults)
     }
 
@@ -352,6 +366,18 @@ export async function executeBatch(projects, onProgress = () => {}, shouldContin
     })
   }
   return results
+}
+
+function ensureRunning(shouldContinue, signal) {
+  if (signal?.aborted || !shouldContinue()) {
+    const error = new Error('任务已停止')
+    error.name = 'AbortError'
+    throw error
+  }
+}
+
+function isCancellation(error, shouldContinue, signal) {
+  return signal?.aborted || !shouldContinue() || error?.name === 'AbortError'
 }
 
 function createImageResults(selected, fields = IMAGE_FIELDS) {

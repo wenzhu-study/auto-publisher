@@ -191,6 +191,44 @@ test('records each image result and continues after one upload fails', async () 
   }
 })
 
+test('cancels a hanging WordPress request without waiting for its timeout', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'auto-publisher-cancel-'))
+  const imagePath = path.join(root, 'about-us-3-1-1.png')
+  await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  let requestStarted
+  const started = new Promise((resolve) => { requestStarted = resolve })
+  const server = http.createServer((_request, _response) => requestStarted())
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const controller = new AbortController()
+  const project = {
+    name: '停止测试',
+    url: `http://127.0.0.1:${server.address().port}`,
+    username: 'shop',
+    appPassword: 'application-password'
+  }
+  const startedAt = Date.now()
+
+  try {
+    const execution = executeBatch([{
+      folderName: '停止测试',
+      project,
+      selected: { 'about-us': imagePath },
+      fieldsToProcess: ['about-us']
+    }], () => {}, () => !controller.signal.aborted, { signal: controller.signal })
+    await started
+    controller.abort()
+    const [result] = await execution
+    assert.equal(result.status, 'cancelled')
+    assert.equal(result.imageResults['about-us'].status, 'not-processed')
+    assert.match(result.imageResults['about-us'].reason, /任务已停止/)
+    assert.ok(Date.now() - startedAt < 1000, '停止请求应在 1 秒内完成')
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise((resolve) => server.close(resolve))
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 async function readBody(request) {
   const chunks = []
   for await (const chunk of request) chunks.push(chunk)

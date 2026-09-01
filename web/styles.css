@@ -1392,6 +1392,26 @@ dialog::backdrop {
   color: var(--muted);
 }
 
+.report-search-bar {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.report-search-box {
+  width: min(420px, 100%);
+}
+
+.report-search-bar > span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .report-filter-head {
   min-height: 38px;
   display: flex;
@@ -1853,6 +1873,17 @@ dialog::backdrop {
 
   .report-detail-summary > :last-child {
     grid-column: 1 / -1;
+  }
+
+  .report-search-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 5px;
+    padding: 8px;
+  }
+
+  .report-search-box {
+    width: 100%;
   }
 
   .report-detail-body {

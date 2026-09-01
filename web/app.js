@@ -22,6 +22,7 @@ const state = {
   issueReportName: '',
   reportDetail: null,
   reportDetailFilter: 'all',
+  reportDetailSearch: '',
   pollingTimer: 0,
   loading: false,
   selectingDirectory: false,
@@ -39,7 +40,7 @@ const elements = Object.fromEntries(
     'issue-count', 'issue-callout', 'issue-callout-count', 'issues-source', 'issue-list', 'job-badge', 'job-fraction',
     'progress-bar', 'job-completed', 'job-failed', 'event-list', 'report-list', 'action-selection',
     'image-succeeded', 'image-failed', 'image-skipped', 'report-dialog', 'report-detail-title',
-    'report-detail-meta', 'report-detail-summary', 'report-detail-body',
+    'report-detail-meta', 'report-detail-summary', 'report-search-input', 'report-search-count', 'report-detail-body',
     'action-seed', 'stop-button', 'check-button', 'upload-button', 'upload-dialog',
     'resume-button', 'restart-batch-button',
     'dialog-project-count', 'dialog-image-count', 'dialog-missing-count', 'dialog-seed', 'dialog-fields',
@@ -63,6 +64,7 @@ async function boot() {
         !config.features?.publisherTargetPagination ||
         !config.features?.targetAwareImageStatuses ||
         !config.features?.duplicateUrlNameDisambiguation ||
+        !config.features?.instantJobCancellation ||
         !config.features?.directoryPicker || !config.features?.browserDirectoryPicker ||
         config.features?.imageFieldSchema !== 8) {
       throw new Error('本地服务需要重启后才能使用最新图片分类')
@@ -133,6 +135,7 @@ function bindEvents() {
   elements['issue-callout'].addEventListener('click', () => switchPanel('issues'))
   elements['report-list'].addEventListener('click', onReportClick)
   elements['report-detail-summary'].addEventListener('click', onReportSummaryClick)
+  elements['report-search-input'].addEventListener('input', onReportSearch)
   elements['check-button'].addEventListener('click', () => startJob('check'))
   elements['upload-button'].addEventListener('click', openUploadDialog)
   elements['resume-button'].addEventListener('click', openUploadDialog)
@@ -655,6 +658,12 @@ function beginPolling() {
         toast(jobStatusLabel(state.activeJob), state.activeJob.failed ? 'error' : 'success')
       }
     } catch (error) {
+      if (error.status === 404) {
+        clearTimeout(state.pollingTimer)
+        toast('本地服务已重启，正在恢复未完成任务')
+        setTimeout(() => window.location.reload(), 300)
+        return
+      }
       toast(error.message, 'error')
       state.pollingTimer = setTimeout(poll, 2000)
     }
@@ -772,6 +781,8 @@ async function openReport(name) {
     const result = await api(`/api/reports/${encodeURIComponent(name)}`)
     state.reportDetail = result.report
     state.reportDetailFilter = 'all'
+    state.reportDetailSearch = ''
+    elements['report-search-input'].value = ''
     elements['report-detail-title'].textContent = name
     elements['report-detail-meta'].textContent = `${state.reportDetail.mode === 'upload' ? '正式上传' : '站点检查'} · ${formatDateTime(state.reportDetail.startedAt)}`
     renderReportDetail()
@@ -789,6 +800,11 @@ function onReportSummaryClick(event) {
   renderReportDetail()
 }
 
+function onReportSearch() {
+  state.reportDetailSearch = elements['report-search-input'].value.trim()
+  renderReportDetail()
+}
+
 function renderReportDetail() {
   const report = state.reportDetail
   if (!report) return
@@ -802,6 +818,10 @@ function renderReportDetail() {
     failed: { label: '失败项目', projects: failed }
   }
   const current = filters[state.reportDetailFilter] || filters.all
+  const query = normalizeReportSearch(state.reportDetailSearch)
+  const visibleProjects = query
+    ? current.projects.filter((project) => reportProjectSearchText(project).includes(query))
+    : current.projects
   elements['report-detail-summary'].innerHTML = `
     ${reportSummaryButton('all', projects.length, '项目')}
     ${reportSummaryButton('success', successful.length, '项目成功')}
@@ -809,14 +829,30 @@ function renderReportDetail() {
     <span class="report-summary-stat"><b>${report.imageSucceeded ?? imageResults.filter((image) => image.status === 'succeeded').length}</b> 图片成功</span>
     <span class="report-summary-stat summary-error"><b>${report.imageFailed ?? imageResults.filter((image) => ['upload-failed', 'write-failed'].includes(image.status)).length}</b> 图片失败</span>
   `
+  elements['report-search-count'].textContent = query
+    ? `找到 ${visibleProjects.length} 个项目`
+    : `${current.projects.length} 个项目`
   elements['report-detail-body'].innerHTML = `
     <div class="report-filter-head">
       <strong>${current.label}</strong>
-      <span>${current.projects.length} 个项目</span>
+      <span>${query ? `搜索结果 ${visibleProjects.length} / ` : ''}${current.projects.length} 个项目</span>
     </div>
-    ${current.projects.map(renderReportProject).join('') ||
-      `<div class="event-placeholder"><span>没有${current.label}</span></div>`}
+    ${visibleProjects.map(renderReportProject).join('') ||
+      `<div class="event-placeholder"><i data-lucide="search-x"></i><span>${query ? '没有匹配的项目' : `没有${current.label}`}</span></div>`}
   `
+  refreshIcons()
+}
+
+function normalizeReportSearch(value) {
+  return String(value || '').trim().toLocaleLowerCase()
+}
+
+function reportProjectSearchText(project) {
+  return normalizeReportSearch([
+    project.projectName,
+    project.folderName,
+    project.siteUrl
+  ].filter(Boolean).join(' '))
 }
 
 function reportSummaryButton(filter, count, label, error = false) {
@@ -1171,7 +1207,11 @@ async function api(url, options = {}) {
     throw error
   }
   const data = await response.json().catch(() => ({}))
-  if (!response.ok || data.ok === false) throw new Error(data.error || `请求失败：HTTP ${response.status}`)
+  if (!response.ok || data.ok === false) {
+    const error = new Error(data.error || `请求失败：HTTP ${response.status}`)
+    error.status = response.status
+    throw error
+  }
   return data
 }
 

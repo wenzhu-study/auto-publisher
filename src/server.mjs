@@ -79,6 +79,7 @@ async function handleApi(request, response, url) {
         publisherTargetPagination: true,
         targetAwareImageStatuses: true,
         duplicateUrlNameDisambiguation: true,
+        instantJobCancellation: true,
         directoryPicker: true,
         browserDirectoryPicker: true,
         imageFieldSchema: 8
@@ -124,7 +125,11 @@ async function handleApi(request, response, url) {
   const jobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/)
   if (request.method === 'GET' && jobMatch) {
     const job = jobs.get(jobMatch[1])
-    if (!job) return sendJson(response, 404, { ok: false, error: '任务不存在' })
+    if (!job) {
+      const persistedJob = await findPersistedJob(jobMatch[1])
+      if (!persistedJob) return sendJson(response, 404, { ok: false, error: '任务不存在' })
+      return sendJson(response, 200, { ok: true, job: persistedJob })
+    }
     return sendJson(response, 200, { ok: true, job: publicJob(job) })
   }
 
@@ -134,7 +139,8 @@ async function handleApi(request, response, url) {
     if (!job) return sendJson(response, 404, { ok: false, error: '任务不存在' })
     if (job.status === 'running') {
       job.cancelRequested = true
-      addEvent(job, { stage: 'cancel-requested', message: '已请求停止，将在当前项目结束后停止' })
+      job.abortController?.abort()
+      addEvent(job, { stage: 'cancel-requested', message: '已请求停止，正在取消当前网络请求' })
     }
     return sendJson(response, 200, { ok: true, job: publicJob(job) })
   }
@@ -214,7 +220,8 @@ async function handleApi(request, response, url) {
       events: [],
       results: [],
       reportPath: '',
-      reportWrite: Promise.resolve()
+      reportWrite: Promise.resolve(),
+      abortController: new AbortController()
     }
     jobs.set(job.id, job)
     activeJobId = job.id
@@ -282,9 +289,10 @@ async function runJob(job, selected) {
     })
   }
   const shouldContinue = () => !job.cancelRequested
+  const executionOptions = { signal: job.abortController.signal }
   job.results = job.mode === 'upload'
-    ? await executeBatch(selected, onProgress, shouldContinue)
-    : await checkSites(selected, onProgress, job.projectText ? 1 : 5, shouldContinue)
+    ? await executeBatch(selected, onProgress, shouldContinue, executionOptions)
+    : await checkSites(selected, onProgress, job.projectText ? 1 : 5, shouldContinue, executionOptions)
   job.finishedAt = new Date().toISOString()
   job.status = job.cancelRequested ? 'cancelled' : job.failed ? 'completed-with-errors' : 'completed'
   await queueJobReport(job)
@@ -354,6 +362,7 @@ async function writeJobReport(job) {
     job.reportPath = path.join(logsDir, `ui-${job.mode}-${timestamp}-${job.id.slice(0, 8)}.json`)
   }
   const report = {
+    id: job.id,
     mode: job.mode,
     projectListName: job.projectListName,
     importSummary: job.importSummary,
@@ -371,7 +380,8 @@ async function writeJobReport(job) {
     imageSkipped: job.imageSkipped,
     status: job.status,
     plan: job.plan,
-    results: job.results
+    results: job.results,
+    events: job.events
   }
   await writeFile(job.reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
   return job.reportPath
@@ -428,6 +438,49 @@ async function readReport(name) {
   } catch (error) {
     if (error.code === 'ENOENT') throw new Error('报告不存在')
     throw new Error(`报告读取失败：${error.message}`)
+  }
+}
+
+async function findPersistedJob(jobId) {
+  const idPrefix = String(jobId || '').slice(0, 8)
+  if (!/^[0-9a-f]{8}$/i.test(idPrefix)) return null
+  const logsDir = path.join(ROOT, 'logs')
+  try {
+    const name = (await readdir(logsDir))
+      .filter((candidate) => isReportFile(candidate) && candidate.endsWith(`-${idPrefix}.json`))
+      .sort()
+      .at(-1)
+    if (!name) return null
+    const report = JSON.parse(await readFile(path.join(logsDir, name), 'utf8'))
+    const total = report.totalProjects ?? report.totalTasks ?? report.plan?.length ?? 0
+    const results = Array.isArray(report.results) ? report.results : []
+    return {
+      id: report.id || jobId,
+      mode: report.mode || 'upload',
+      seed: report.seed || '',
+      projectText: report.projectText || '',
+      projectListName: report.projectListName || '',
+      importSummary: report.importSummary || null,
+      status: report.status === 'running' ? 'cancelled' : (report.status || 'cancelled'),
+      cancelRequested: report.status === 'running' || report.status === 'cancelled',
+      total,
+      completed: report.completed ?? results.length,
+      failed: report.failed ?? 0,
+      warnings: report.warnings ?? 0,
+      imageSucceeded: report.imageSucceeded ?? countReportImages(report, 'succeeded'),
+      imageFailed: report.imageFailed ?? countReportImages(report, ['upload-failed', 'write-failed']),
+      imageSkipped: report.imageSkipped ?? countReportImages(report, ['skipped', 'not-applicable']),
+      startedAt: report.startedAt || '',
+      finishedAt: report.finishedAt || '',
+      selectedFolders: (report.plan || []).map((item) => item?.folderName).filter(Boolean),
+      plan: report.plan || [],
+      events: report.events || [],
+      results,
+      reportPath: path.join('logs', name)
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') return null
+    return null
   }
 }
 
