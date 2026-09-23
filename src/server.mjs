@@ -11,6 +11,7 @@ import { fetchShopProjects, matchImageProjects, readProjectMap } from './project
 import { matchImportedProjects } from './project-list.mjs'
 import { createSeed } from './random.mjs'
 import { buildResumeState } from './resume.mjs'
+import { resolveBrowserSelectedDirectory } from './directory-picker.mjs'
 
 const HOST = process.env.UI_HOST || '127.0.0.1'
 const PORT = positiveInteger(process.env.UI_PORT) || 3580
@@ -50,7 +51,10 @@ async function handleApi(request, response, url) {
       return sendJson(response, 409, { ok: false, error: '任务运行期间不能切换图片文件夹' })
     }
     const body = await readJsonBody(request)
-    const selectedPath = await resolveBrowserSelectedDirectory(body.rootName, body.relativePaths)
+    const selectedPath = await resolveBrowserSelectedDirectory(body.rootName, body.relativePaths, {
+      candidateBases: directoryCandidateBases(),
+      searchBases: directorySearchBases()
+    })
     imagesDir = await validateImagesDirectory(selectedPath)
     await saveImagesDirectory(imagesDir)
     await dismissResumeHistory()
@@ -614,46 +618,6 @@ async function isDirectory(value) {
   return Boolean(info?.isDirectory())
 }
 
-async function resolveBrowserSelectedDirectory(rootNameValue, relativePathValues) {
-  const rootName = String(rootNameValue || '').trim()
-  if (!rootName || path.basename(rootName) !== rootName || ['.', '..'].includes(rootName)) {
-    throw new Error('浏览器返回的图片文件夹名称无效')
-  }
-
-  const relativePaths = [...new Set(Array.isArray(relativePathValues) ? relativePathValues : [])]
-    .map(normalizeBrowserRelativePath)
-    .filter(Boolean)
-    .slice(0, 80)
-  if (!relativePaths.length) throw new Error('选择的文件夹中没有可读取的文件')
-
-  const candidateBases = directoryCandidateBases()
-  const candidates = new Set()
-  for (const base of candidateBases) {
-    if (path.basename(base).toLocaleLowerCase('zh-CN') === rootName.toLocaleLowerCase('zh-CN')) {
-      candidates.add(path.resolve(base))
-    }
-    candidates.add(path.resolve(base, rootName))
-  }
-
-  const matches = []
-  for (const candidate of candidates) {
-    if (!await isDirectory(candidate)) continue
-    const probesMatch = await Promise.all(relativePaths.map((relativePath) =>
-      stat(path.join(candidate, relativePath)).then((info) => info.isFile()).catch(() => false)))
-    if (probesMatch.every(Boolean)) matches.push(candidate)
-  }
-
-  if (matches.length === 1) return matches[0]
-  if (matches.length > 1) throw new Error(`找到多个同名图片文件夹：${rootName}，请保留唯一目录后重试`)
-  throw new Error(`本地服务无法定位所选文件夹“${rootName}”，请将它放在项目同级目录或桌面后重试`)
-}
-
-function normalizeBrowserRelativePath(value) {
-  const segments = String(value || '').replaceAll('\\', '/').split('/').filter(Boolean)
-  if (segments.length < 2 || segments.some((segment) => segment === '.' || segment === '..')) return ''
-  return path.join(...segments.slice(1))
-}
-
 function directoryCandidateBases() {
   const values = [ROOT, imagesDir, os.homedir()]
   let current = ROOT
@@ -666,6 +630,27 @@ function directoryCandidateBases() {
   for (const base of [os.homedir(), process.env.USERPROFILE, process.env.OneDrive]) {
     if (!base) continue
     values.push(base, path.join(base, 'Desktop'), path.join(base, 'Downloads'), path.join(base, 'Documents'), path.join(base, 'Pictures'))
+  }
+  return [...new Set(values.filter(Boolean).map((value) => path.resolve(value)))]
+}
+
+function directorySearchBases() {
+  const values = [
+    ROOT,
+    path.dirname(ROOT),
+    path.dirname(path.dirname(ROOT)),
+    imagesDir,
+    path.dirname(imagesDir),
+    path.dirname(path.dirname(imagesDir))
+  ]
+  for (const base of [os.homedir(), process.env.USERPROFILE, process.env.OneDrive]) {
+    if (!base) continue
+    values.push(
+      path.join(base, 'Desktop'),
+      path.join(base, 'Downloads'),
+      path.join(base, 'Documents'),
+      path.join(base, 'Pictures')
+    )
   }
   return [...new Set(values.filter(Boolean).map((value) => path.resolve(value)))]
 }
