@@ -7,6 +7,7 @@
   "scripts": {
     "check": "node src/cli.mjs",
     "check:sites": "node src/cli.mjs --check-sites",
+    "audit:agentcy": "node scripts/find-empty-agentcy.mjs",
     "upload": "node src/cli.mjs --execute",
     "ui": "node src/server.mjs",
     "test": "node --test"

@@ -179,6 +179,34 @@ test('reads every target page and accepts oem-odm as an oem fallback', async () 
   }
 })
 
+test('accepts agency as an agentcy fallback and exposes its featured image state', async () => {
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost')
+    if (url.pathname === '/wp-json/wp/v2/pages') {
+      return json(response, 200, [
+        { id: 51, slug: 'agency', title: { rendered: 'Agency' }, featured_media: 0 }
+      ], { 'X-WP-TotalPages': '1' })
+    }
+    return json(response, 404, { message: 'not found' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const project = {
+    url: `http://127.0.0.1:${server.address().port}`,
+    username: 'shop',
+    appPassword: 'application-password'
+  }
+
+  try {
+    const targets = await resolvePublisherTargets(project, [
+      { key: 'agentcy', pageSlug: 'agentcy', targetType: 'page-featured' }
+    ])
+    assert.equal(targets.agentcy.target.slug, 'agency')
+    assert.equal(targets.agentcy.target.featuredMedia, 0)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('writes and verifies page featured images and product tag category banners', async () => {
   let featuredMedia = 0
   let categoryBanner = 0

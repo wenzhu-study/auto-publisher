@@ -5,6 +5,7 @@ import { CONTENT_TYPES } from './constants.mjs'
 const DEFAULT_TIMEOUT_MS = 120000
 const RETRIES = 2
 const TARGET_SLUG_ALIASES = Object.freeze({
+  agentcy: ['agency'],
   oem: ['oem-odm']
 })
 
@@ -378,7 +379,8 @@ export async function resolvePublisherTargets(project, fields, options = {}) {
           id: Number(target.id),
           slug: target.slug,
           name: target.name || target.title?.rendered || target.slug,
-          targetType: field.targetType
+          targetType: field.targetType,
+          featuredMedia: Number(target.featured_media) || 0
         },
         reason: ''
       }]
